@@ -1,0 +1,16 @@
+name: "Binder IPC 阻塞主线程"
+description: "同步 Binder 调用 (系统服务/ContentProvider) 阻塞主线程"
+scene: ""
+rootCause: BINDER_CALL
+confidence: MEDIUM
+
+match:
+  hotMethod: "*Binder*transact*|*ServiceManager*|*ContentResolver*query*|*ContentProvider*|*PackageManager*|*ActivityManager*"
+  percentage: ">10%"
+
+suggestion:
+  - 1. 将系统服务调用移到后台线程
+  - 2. ContentProvider 查询使用 CursorLoader 或 Flow
+  - 3. PackageManager 查询结果做内存缓存
+  - 4. 避免在滑动/动画期间查询系统服务
+  - 5. 使用 ContentResolver.query() 的异步版本

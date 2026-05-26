@@ -1,0 +1,17 @@
+name: "内存泄漏导致频繁 GC"
+description: "内存持续增长触发频繁 GC，Stop-The-World 暂停导致帧卡顿"
+scene: ""
+rootCause: GC_PRESSURE
+confidence: HIGH
+
+match:
+  hotMethod: "*GC*|*finalize*|*cleaner*|*ReferenceQueue*"
+  percentage: ">10%"
+
+suggestion:
+  - 1. 使用 LeakCanary 定位泄漏对象
+  - 2. 检查 Activity/Fragment 是否被 static 变量引用
+  - 3. 取消注册的 Listener/Observer (onDestroy 中清理)
+  - 4. Handler.postDelayed 的 Runnable 是否持有外部引用
+  - 5. 匿名内部类/lambda 隐式持有外部 Activity 引用
+  - 6. Bitmap 使用完毕及时 recycle() 或使用 Glide 管理

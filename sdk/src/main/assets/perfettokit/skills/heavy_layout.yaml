@@ -1,0 +1,16 @@
+name: "布局 measure/layout 耗时"
+description: "View 树的 measure 和 layout 阶段耗时过长，通常是嵌套层级过深或 RelativeLayout 多次测量"
+scene: ""
+rootCause: HEAVY_LAYOUT
+confidence: MEDIUM
+
+match:
+  hotMethod: "*measure*|*onMeasure*|*layout*|*onLayout*|*inflate*|*LayoutInflater*"
+  percentage: ">25%"
+
+suggestion:
+  - 1. 使用 ConstraintLayout 减少嵌套层级（目标 < 5 层）
+  - 2. 避免 RelativeLayout 嵌套（双重测量问题）
+  - 3. RecyclerView item 使用 ViewStub 延迟加载不可见部分
+  - 4. 复杂列表考虑 AsyncLayoutInflater 异步 inflate
+  - 5. 使用 Layout Inspector 检查实际层级

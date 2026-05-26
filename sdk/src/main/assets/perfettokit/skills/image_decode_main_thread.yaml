@@ -1,0 +1,16 @@
+name: "图片主线程解码"
+description: "图片解码/缩放操作在主线程执行，阻塞帧渲染"
+scene: "*scroll*|*list*|*image*"
+rootCause: MAIN_THREAD_IO
+confidence: HIGH
+
+match:
+  hotMethod: "*BitmapFactory*|*decode*|*Bitmap.createScaledBitmap*|*ImageDecoder*|*Glide*transform*|*Fresco*decode*"
+  percentage: ">12%"
+
+suggestion:
+  - 1. 使用 Glide/Coil 加载图片（默认异步解码）
+  - 2. 避免在 onBindViewHolder 中调用 BitmapFactory.decodeFile()
+  - 3. 列表中使用 override(width, height) 限制图片尺寸
+  - 4. 启用 Glide 的 diskCacheStrategy 避免重复解码
+  - 5. 大图使用 BitmapRegionDecoder 分块加载

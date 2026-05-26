@@ -1,0 +1,18 @@
+name: "RecyclerView 列表滑动优化"
+description: "RecyclerView 滑动场景专项分析"
+scene: "*scroll*|*list*|*recycler*|*fling*"
+rootCause: SLOW_METHOD
+confidence: MEDIUM
+
+match:
+  hotMethod: "*onBindViewHolder*|*onCreateViewHolder*|*RecyclerView*"
+  percentage: ">20%"
+  frameAvgMs: ">16.67"
+
+suggestion:
+  - 1. onBindViewHolder 中避免耗时操作（图片加载、格式化、IO）
+  - 2. 启用 setHasFixedSize(true) 减少 layout 计算
+  - 3. 增加 setItemViewCacheSize() 缓存数量
+  - 4. 复杂 item 拆分为多 ViewType + 懒加载
+  - 5. 使用 DiffUtil 代替 notifyDataSetChanged()
+  - 6. 滑动期间暂停图片加载 (Glide.pauseRequests)

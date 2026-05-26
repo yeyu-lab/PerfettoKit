@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <!--
+            自动初始化 PerfettoKit。
+            开发者无需手动调用 init()，SDK 在 App 启动时自动完成默认初始化。
+            如需禁用，在 App Manifest 中对此 provider 加 tools:node="remove"。
+        -->
+        <provider
+            android:name="io.github.perfettokit.PerfettoKitInitializer"
+            android:authorities="${applicationId}.perfettokit-init"
+            android:exported="false" />
+    </application>
+
+</manifest>

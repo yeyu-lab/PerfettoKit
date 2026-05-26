@@ -1,0 +1,16 @@
+name: "自定义 View 绘制耗时"
+description: "onDraw / Canvas 操作耗时超过帧预算"
+scene: "*draw*|*render*|*canvas*|*custom_view*"
+rootCause: HEAVY_DRAW
+confidence: MEDIUM
+
+match:
+  hotMethod: "*onDraw*|*draw*|*Canvas*|*drawBitmap*|*drawPath*|*drawText*|*Paint*"
+  percentage: ">30%"
+
+suggestion:
+  - 1. 将 Paint/Path/Matrix 提升为类成员变量，避免 onDraw 中 new
+  - 2. 使用 Canvas.clipRect() 限定重绘区域
+  - 3. 静态内容用 Bitmap 缓存 (Canvas drawBitmap)
+  - 4. 高频刷新场景考虑 SurfaceView/TextureView
+  - 5. 复杂路径使用 PathMeasure 预计算

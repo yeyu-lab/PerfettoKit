@@ -1,0 +1,15 @@
+name: "GC 压力导致卡顿"
+description: "主线程频繁 GC (垃圾回收)，Stop-The-World 导致帧超时"
+scene: ""
+rootCause: GC_PRESSURE
+confidence: HIGH
+
+match:
+  hotMethod: "*GC*|*finalize*|*cleaner*|*WeakReference*"
+  percentage: ">15%"
+
+suggestion:
+  - 1. 减少 onDraw / onBindViewHolder 中的临时对象创建
+  - 2. 使用对象池 (Pools.SimplePool) 复用 Rect/Paint/Matrix 等
+  - 3. 大数组/Bitmap 操作后主动置 null 帮助回收
+  - 4. 用 Android Studio Allocation Tracker 定位分配热点

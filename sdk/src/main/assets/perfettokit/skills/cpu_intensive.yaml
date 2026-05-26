@@ -1,0 +1,17 @@
+name: "CPU 密集导致帧卡顿"
+description: "进程 CPU 使用率过高，主线程分配到的时间片不足，导致帧延迟"
+scene: ""
+rootCause: SLOW_METHOD
+confidence: MEDIUM
+
+match:
+  hotMethod: "*sort*|*compute*|*calculate*|*parse*|*JSON*|*regex*|*encrypt*|*compress*"
+  percentage: ">20%"
+  frameAvgMs: ">16.67"
+
+suggestion:
+  - 1. 将计算密集操作移到 Dispatchers.Default 协程
+  - 2. 大数据集排序/过滤使用分页或流式处理
+  - 3. JSON 解析使用 Moshi/kotlinx.serialization (避免反射)
+  - 4. 正则表达式预编译为 Pattern 常量
+  - 5. 考虑使用 RenderScript 或 NDK 加速纯计算

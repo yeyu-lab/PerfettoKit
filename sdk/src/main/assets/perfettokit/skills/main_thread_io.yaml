@@ -1,0 +1,16 @@
+name: "主线程 IO 阻塞"
+description: "主线程执行文件读写/数据库查询/网络请求，阻塞渲染"
+scene: ""
+rootCause: MAIN_THREAD_IO
+confidence: HIGH
+
+match:
+  hotMethod: "*read*|*write*|*query*|*openConnection*|*SharedPreferences*commit*|*SQLiteDatabase*|*FileInputStream*|*BufferedReader*"
+  percentage: ">10%"
+
+suggestion:
+  - 1. 文件/数据库操作移到 Dispatchers.IO 协程
+  - 2. SharedPreferences 改用 apply() 替代 commit()
+  - 3. 网络请求使用 Retrofit + suspend 函数
+  - 4. 数据库使用 Room + Flow 异步查询
+  - 5. 使用 StrictMode 在开发期间检测主线程 IO

@@ -1,0 +1,16 @@
+name: "锁竞争导致主线程等待"
+description: "主线程因 synchronized/ReentrantLock 等待其他线程释放锁"
+scene: ""
+rootCause: LOCK_CONTENTION
+confidence: MEDIUM
+
+match:
+  hotMethod: "*wait*|*park*|*synchronized*|*ReentrantLock*|*Object.wait*|*LockSupport.park*|*monitor*"
+  percentage: ">15%"
+
+suggestion:
+  - 1. 减少主线程持有锁的代码范围
+  - 2. 使用 ConcurrentHashMap 替代 synchronized HashMap
+  - 3. 使用 AtomicXxx 替代简单的 synchronized 计数
+  - 4. 考虑使用 Channel/Flow 替代共享锁
+  - 5. 检查是否有子线程长时间持锁
