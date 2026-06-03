@@ -1,6 +1,7 @@
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
+    id("maven-publish")
 }
 
 android {
@@ -19,6 +20,33 @@ android {
 
     kotlinOptions {
         jvmTarget = "11"
+    }
+}
+
+afterEvaluate {
+    publishing {
+        publications {
+            create<MavenPublication>("release") {
+                from(components["release"])
+
+                groupId = "com.github.yeyu-lab"
+                artifactId = "PerfettoKit"
+                version = findProperty("VERSION_NAME")?.toString() ?: "1.0.0"
+
+                pom {
+                    name.set("PerfettoKit")
+                    description.set("AI-Powered Android performance detection & root-cause analysis SDK")
+                    url.set("https://github.com/yeyu-lab/PerfettoKit")
+
+                    licenses {
+                        license {
+                            name.set("Apache License 2.0")
+                            url.set("https://www.apache.org/licenses/LICENSE-2.0")
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

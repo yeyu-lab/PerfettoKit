@@ -56,14 +56,35 @@ PerfettoKit/
 
 ### 1. 引入 SDK
 
-在你的 `settings.gradle.kts` 中加入本仓库的 `:sdk` 模块（或后续发布到 Maven 后通过坐标引入）：
+**方式一：JitPack（推荐）**
+
+在项目根 `settings.gradle.kts` 中添加 JitPack 仓库：
+
+```kotlin
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url = uri("https://jitpack.io") }
+    }
+}
+```
+
+App 模块添加依赖：
+
+```kotlin
+dependencies {
+    implementation("com.github.yeyu-lab:PerfettoKit:1.0.0")
+}
+```
+
+[![](https://jitpack.io/v/yeyu-lab/PerfettoKit.svg)](https://jitpack.io/#yeyu-lab/PerfettoKit)
+
+**方式二：源码引入**
 
 ```kotlin
 include(":sdk")
-```
-
-App 模块依赖：
-```kotlin
+// App 模块
 dependencies {
     implementation(project(":sdk"))
 }

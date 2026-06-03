@@ -56,14 +56,35 @@ PerfettoKit/
 
 ### 1. Add the SDK
 
-Include the `:sdk` module from this repo in your `settings.gradle.kts` (or pull it from Maven once published):
+**Option A: JitPack (Recommended)**
+
+Add JitPack repository to your root `settings.gradle.kts`:
+
+```kotlin
+dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url = uri("https://jitpack.io") }
+    }
+}
+```
+
+Add the dependency to your app module:
+
+```kotlin
+dependencies {
+    implementation("com.github.yeyu-lab:PerfettoKit:1.0.0")
+}
+```
+
+[![](https://jitpack.io/v/yeyu-lab/PerfettoKit.svg)](https://jitpack.io/#yeyu-lab/PerfettoKit)
+
+**Option B: Source Module**
 
 ```kotlin
 include(":sdk")
-```
-
-App-module dependency:
-```kotlin
+// App module
 dependencies {
     implementation(project(":sdk"))
 }
