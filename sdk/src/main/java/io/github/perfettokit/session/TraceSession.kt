@@ -385,11 +385,19 @@ class TraceSession internal constructor(
 
         reporter.report(finalReport)
 
-        // 第四层：LLM 增强（异步，不阻塞）
-        llmEnhancer?.enhanceAsync(finalReport) { aiResponse ->
-            if (aiResponse != null) {
-                Log.i("PerfettoKit", "━━━ AI 增强建议 ━━━")
-                Log.i("PerfettoKit", aiResponse.suggestions.joinToString("\n"))
+        // 第四层：LLM 增强（异步，不阻塞）— 仅在有 issues 时触发
+        if (finalReport.hasIssues) {
+            llmEnhancer?.enhanceAsync(finalReport) { aiResponse ->
+                if (aiResponse != null) {
+                    Log.i("PerfettoKit", "━━━ AI 增强建议 ━━━")
+                    Log.i("PerfettoKit", aiResponse.summary)
+                    aiResponse.suggestions.forEach { Log.i("PerfettoKit", "   $it") }
+                    if (aiResponse.codeSnippet != null) {
+                        Log.i("PerfettoKit", "━━━ 代码示例 ━━━")
+                        Log.i("PerfettoKit", aiResponse.codeSnippet!!)
+                    }
+                    Log.i("PerfettoKit", "━━━━━━━━━━━━━━━━━━━")
+                }
             }
         }
 

@@ -59,6 +59,20 @@ class LLMEnhancer(
     }
 
     private fun buildRequest(report: DiagnosisReport): AIRequest {
+        val frames = report.totalFrames
+        val jankCount = report.issues.count {
+            it.rule == "SlowFrame" || it.rule == "ScrollJank"
+        }
+
+        // 从 MethodTracer 慢方法中提取
+        val tracedSlowMethods = report.slowMessageStats.topSlowMethods.take(5).map {
+            AIRequest.SlowMethodInfo(method = it.method, durationMs = it.avgDurationMs)
+        }.ifEmpty {
+            (report.analysis?.slowMethods ?: emptyList()).map {
+                AIRequest.SlowMethodInfo(method = it.method, durationMs = it.durationMs)
+            }
+        }
+
         return AIRequest(
             scene = report.scene,
             summary = report.summary,
@@ -72,14 +86,12 @@ class LLMEnhancer(
             hotMethods = report.hotMethods.map {
                 "${it.method} (%.1f%%)".format(it.percentage)
             },
-            slowMethods = (report.analysis?.slowMethods ?: emptyList()).map {
-                AIRequest.SlowMethodInfo(method = it.method, durationMs = it.durationMs)
-            },
+            slowMethods = tracedSlowMethods,
             frameStats = AIRequest.FrameStatsInfo(
-                totalFrames = report.totalFrames,
-                avgMs = 0.0,  // 从 summary 中已有
-                maxMs = 0.0,
-                jankCount = 0
+                totalFrames = frames,
+                avgMs = if (frames > 0) report.durationMs.toDouble() / frames else 0.0,
+                maxMs = report.jankFrameDetails.maxOfOrNull { it.durationMs } ?: 0.0,
+                jankCount = jankCount
             ),
             customContext = buildExtraContext(report)
         )

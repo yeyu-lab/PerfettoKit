@@ -51,7 +51,7 @@ class OpenAICompatProvider(
         conn.setRequestProperty("Authorization", "Bearer $apiKey")
         conn.doOutput = true
         conn.connectTimeout = 15_000
-        conn.readTimeout = 30_000
+        conn.readTimeout = 120_000
 
         val body = JSONObject().apply {
             put("model", model)

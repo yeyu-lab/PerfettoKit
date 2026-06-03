@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
+        android:networkSecurityConfig="@xml/network_security_config"
         android:name=".SampleApp"
         android:allowBackup="false"
         android:label="PerfettoKit Sample"
@@ -14,6 +18,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 禁用 SDK 自动初始化，改由 SampleApp.onCreate 手动 init（带 AI 配置） -->
+        <provider
+            android:name="io.github.perfettokit.PerfettoKitInitializer"
+            android:authorities="${applicationId}.perfettokit-init"
+            tools:node="remove" />
     </application>
 
 </manifest>

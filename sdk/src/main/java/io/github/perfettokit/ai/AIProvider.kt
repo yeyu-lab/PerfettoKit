@@ -61,17 +61,18 @@ data class AIRequest(
      * 构造发给 LLM 的 prompt。
      */
     fun toPrompt(): String = buildString {
-        appendLine("你是 Android 性能优化专家。请基于以下诊断数据给出具体的优化建议和代码示例。")
+        appendLine("你是 Android 性能优化专家。以下是 PerfettoKit SDK 的自动检测报告。")
+        appendLine("请基于已有数据给出**针对性**的优化建议，不要给出与数据无关的通用建议。")
         appendLine()
         appendLine("## 场景: $scene")
+        appendLine("## 概览: $summary")
+        appendLine()
         appendLine("## 帧统计")
-        appendLine("- 总帧数: ${frameStats.totalFrames}")
-        appendLine("- 平均帧耗时: ${"%.1f".format(frameStats.avgMs)}ms")
-        appendLine("- 最大帧耗时: ${"%.1f".format(frameStats.maxMs)}ms")
-        appendLine("- 掉帧数: ${frameStats.jankCount}")
+        appendLine("- 总帧数: ${frameStats.totalFrames}, 掉帧: ${frameStats.jankCount}")
+        appendLine("- 平均帧耗时: ${"%.1f".format(frameStats.avgMs)}ms, 最慢帧: ${"%.1f".format(frameStats.maxMs)}ms")
         appendLine()
         if (rootCauses.isNotEmpty()) {
-            appendLine("## 已识别根因")
+            appendLine("## 已识别根因（SDK 规则引擎输出）")
             rootCauses.forEach {
                 appendLine("- [${it.type}] ${it.description}")
                 appendLine("  证据: ${it.evidence}")
@@ -79,24 +80,34 @@ data class AIRequest(
             appendLine()
         }
         if (hotMethods.isNotEmpty()) {
-            appendLine("## 热点方法")
+            appendLine("## 主线程热点方法（栈采样 Top，占比越高说明耗时越多）")
             hotMethods.forEach { appendLine("- $it") }
             appendLine()
         }
         if (slowMethods.isNotEmpty()) {
-            appendLine("## 慢方法 (插桩)")
+            appendLine("## 慢方法（MethodTracer / Looper Monitor 抓到的超时方法）")
             slowMethods.forEach { appendLine("- ${it.method}: ${"%.1f".format(it.durationMs)}ms") }
             appendLine()
         }
         if (customContext.isNotEmpty()) {
-            appendLine("## 开发者补充")
+            appendLine("## 系统指标")
             appendLine(customContext)
             appendLine()
         }
-        appendLine("请给出:")
-        appendLine("1. 根因解释（用一句话总结）")
-        appendLine("2. 具体优化步骤（按优先级排列）")
-        appendLine("3. 对应的 Kotlin 代码示例")
+        appendLine("---")
+        appendLine("请严格按以下格式输出（不要输出其他内容）：")
+        appendLine()
+        appendLine("### 根因（一句话）")
+        appendLine("<一句话总结卡顿根因，引用具体方法名>")
+        appendLine()
+        appendLine("### 优化步骤（按优先级）")
+        appendLine("1. <具体操作 — 必须包含类名/方法名>")
+        appendLine("2. ...")
+        appendLine()
+        appendLine("### 代码示例")
+        appendLine("```kotlin")
+        appendLine("<针对上面第 1 步的修改代码>")
+        appendLine("```")
     }
 }
 
