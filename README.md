@@ -5,10 +5,12 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Android](https://img.shields.io/badge/Android-API%2024%2B-brightgreen.svg)](https://developer.android.com)
 [![Kotlin](https://img.shields.io/badge/Kotlin-1.9.22-7f52ff.svg)](https://kotlinlang.org)
+[![AI Enhanced](https://img.shields.io/badge/AI-Enhanced%20%F0%9F%A7%A0-ff6b6b.svg)](#-ai-智能诊断)
 
-> 一款面向 Android 开发者的轻量级**性能检测与根因分析 SDK**。
-> 通过手动标记 + 自动场景检测的混合模式，配合多维数据采集与规则引擎，
-> 在开发与测试阶段**定位卡顿元凶**，输出"哪里慢、为什么慢、如何修"的诊断报告。
+> 🧠 **AI 加持的 Android 性能检测与根因分析 SDK**
+>
+> 多维数据采集 + 规则引擎 + **LLM 智能归因**，从检测到修复建议一步到位。
+> 输出"哪里慢、为什么慢、如何修"的结构化诊断报告，并由 AI 生成**可执行的代码级修复方案**。
 
 ---
 
@@ -20,7 +22,7 @@
 - **方法级根因定位**：5ms 周期栈采样 + Choreographer 慢消息抓栈 + FrameMetrics 渲染阶段统计。
 - **规则引擎 + Skill 库**：内置 5 套规则 + 10 条 YAML 卡顿模式（GC 抖动、主线程 IO、Binder 阻塞、图片解码等）。
 - **历史回归检测**：本地 `SessionStore` 记录历史指标，自动检测劣化。
-- **可选 AI 增强**：接入兼容 OpenAI 协议的 LLM，对报告做自然语言归纳。
+- **🧠 AI 智能诊断**：接入任意 OpenAI 兼容 LLM（GPT / Claude / 本地 Ollama），自动输出**根因一句话 + 优化步骤 + 代码示例**。
 - **Logcat 友好输出**：总览 → 卡顿元凶 Top → 耗时归因 → 详细数据分层展示。
 
 ---
@@ -267,9 +269,22 @@ adb logcat -s PerfettoKit:I JankDemo:W
 
 ---
 
-## 🤖 可选：LLM 增强
+## � AI 智能诊断
+
+> **从性能数据到修复代码，一步到位。**
+
+PerfettoKit 可接入任意 OpenAI 兼容的 LLM 服务，将采集到的性能数据（热点方法、慢消息、帧耗时）自动构建为结构化 prompt，由 AI 输出：
+
+| 输出项 | 说明 |
+|--------|------|
+| 🎯 根因（一句话） | 直接定位卡顿核心原因 |
+| 📋 优化步骤 | 分步骤的具体修复指引 |
+| 💻 代码示例 | 可直接参考的 Kotlin 修复代码 |
+
+### 接入示例
 
 ```kotlin
+// 云端 LLM（GPT-4o / Claude 等）
 PerfettoKit.init(this, PerfettoKit.Config(
     aiProvider = OpenAICompatProvider(
         apiKey = BuildConfig.LLM_API_KEY,
@@ -277,9 +292,43 @@ PerfettoKit.init(this, PerfettoKit.Config(
         model = "gpt-4o-mini"
     )
 ))
+
+// 本地 LLM（Ollama / LM Studio 等，无需 API Key）
+PerfettoKit.init(this, PerfettoKit.Config(
+    aiProvider = OpenAICompatProvider(
+        apiKey = "ollama",
+        baseUrl = "http://your-pc-ip:11434/v1",
+        model = "qwen2.5-coder:7b"
+    )
+))
 ```
 
-启用后，`DiagnosisReport` 中会附加由 LLM 生成的自然语言摘要与修复建议。
+### AI 输出示例
+
+```
+━━━ AI 增强建议 ━━━
+### 根因（一句话）
+   1. 在 SampleAdapter.onBind 方法中减少对象创建和字符串拼接操作。
+   2. 使用线程池处理可能的同步 I/O 操作。
+━━━ 代码示例 ━━━
+// 1. 减少对象创建和字符串拼接操作
+class SampleAdapter : RecyclerView.Adapter<SampleAdapter.ViewHolder>() {
+    override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+        val sb = StringBuilder()
+        sb.append("Name: ").append(data.name)
+        holder.itemView.textView.text = sb.toString()
+    }
+}
+```
+
+### 支持的 LLM 服务
+
+| 服务 | baseUrl | 推荐模型 |
+|------|---------|----------|
+| OpenAI | `https://api.openai.com/v1` | gpt-4o-mini |
+| Ollama (本地) | `http://localhost:11434/v1` | qwen2.5-coder:7b |
+| LM Studio (本地) | `http://localhost:1234/v1` | 任意 GGUF 模型 |
+| DeepSeek | `https://api.deepseek.com/v1` | deepseek-coder |
 
 ---
 

@@ -5,11 +5,12 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Android](https://img.shields.io/badge/Android-API%2024%2B-brightgreen.svg)](https://developer.android.com)
 [![Kotlin](https://img.shields.io/badge/Kotlin-1.9.22-7f52ff.svg)](https://kotlinlang.org)
+[![AI Enhanced](https://img.shields.io/badge/AI-Enhanced%20%F0%9F%A7%A0-ff6b6b.svg)](#-ai-powered-diagnosis)
 
-> A lightweight **performance detection & root-cause analysis SDK** for Android.
-> Combining manual instrumentation with automatic scene detection, plus multi-dimensional
-> data collection and a rule engine, PerfettoKit pinpoints jank during development and QA,
-> producing a diagnosis report that tells you **what is slow, why it is slow, and how to fix it**.
+> 🧠 **AI-Powered Android Performance Detection & Root-Cause Analysis SDK**
+>
+> Multi-dimensional data collection + Rule engine + **LLM-driven attribution** — from detection to fix suggestions in one step.
+> Produces a structured diagnosis report: **what is slow, why it is slow, and how to fix it** — with AI-generated code-level repair suggestions.
 
 ---
 
@@ -21,7 +22,7 @@
 - **Method-level root cause**: 5 ms sampling profiler + Choreographer slow-message stack capture + FrameMetrics phase breakdown.
 - **Rule engine + Skill library**: 5 built-in rules + 10 YAML jank patterns (GC pressure, main-thread IO, Binder block, image decode, …).
 - **Historical regression detection**: a local `SessionStore` records past metrics, anomalies are flagged automatically.
-- **Optional AI enhancement**: plug in any OpenAI-compatible LLM to get a natural-language summary.
+- **🧠 AI-Powered Diagnosis**: plug in any OpenAI-compatible LLM (GPT / Claude / local Ollama) to get **root cause + fix steps + code examples** automatically.
 - **Logcat-friendly output**: Overview → Top offenders → Time attribution → Detailed metrics, layered for fast triage.
 
 ---
@@ -268,9 +269,22 @@ Inject your own via `PerfettoKit.Config(extraSkills = listOf(...))`.
 
 ---
 
-## 🤖 Optional: LLM Enhancement
+## � AI-Powered Diagnosis
+
+> **From performance data to fix code — in one step.**
+
+PerfettoKit integrates with any OpenAI-compatible LLM service. It automatically constructs a structured prompt from collected performance data (hot methods, slow messages, frame timings) and the AI outputs:
+
+| Output | Description |
+|--------|-------------|
+| 🎯 Root Cause (one line) | Pinpoints the core jank reason |
+| 📋 Fix Steps | Step-by-step remediation guide |
+| 💻 Code Example | Ready-to-use Kotlin fix code |
+
+### Setup
 
 ```kotlin
+// Cloud LLM (GPT-4o / Claude etc.)
 PerfettoKit.init(this, PerfettoKit.Config(
     aiProvider = OpenAICompatProvider(
         apiKey = BuildConfig.LLM_API_KEY,
@@ -278,9 +292,42 @@ PerfettoKit.init(this, PerfettoKit.Config(
         model = "gpt-4o-mini"
     )
 ))
+
+// Local LLM (Ollama / LM Studio — no API key needed)
+PerfettoKit.init(this, PerfettoKit.Config(
+    aiProvider = OpenAICompatProvider(
+        apiKey = "ollama",
+        baseUrl = "http://your-pc-ip:11434/v1",
+        model = "qwen2.5-coder:7b"
+    )
+))
 ```
 
-When enabled, `DiagnosisReport` is augmented with a natural-language summary and fix suggestions produced by the LLM.
+### Sample AI Output
+
+```
+━━━ AI Enhanced Suggestions ━━━
+### Root Cause
+   1. Reduce object creation and string concatenation in SampleAdapter.onBind.
+   2. Move synchronous I/O to a thread pool.
+━━━ Code Example ━━━
+class SampleAdapter : RecyclerView.Adapter<SampleAdapter.ViewHolder>() {
+    override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+        val sb = StringBuilder()
+        sb.append("Name: ").append(data.name)
+        holder.itemView.textView.text = sb.toString()
+    }
+}
+```
+
+### Supported LLM Services
+
+| Service | baseUrl | Recommended Model |
+|---------|---------|-------------------|
+| OpenAI | `https://api.openai.com/v1` | gpt-4o-mini |
+| Ollama (local) | `http://localhost:11434/v1` | qwen2.5-coder:7b |
+| LM Studio (local) | `http://localhost:1234/v1` | Any GGUF model |
+| DeepSeek | `https://api.deepseek.com/v1` | deepseek-coder |
 
 ---
 
