@@ -19,11 +19,6 @@
             </intent-filter>
         </activity>
 
-        <!-- 禁用 SDK 自动初始化，改由 SampleApp.onCreate 手动 init（带 AI 配置） -->
-        <provider
-            android:name="io.github.perfettokit.PerfettoKitInitializer"
-            android:authorities="${applicationId}.perfettokit-init"
-            tools:node="remove" />
     </application>
 
 </manifest>

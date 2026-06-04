@@ -13,7 +13,7 @@ class SampleApp : Application() {
         // 初始化 PerfettoKit
         // Skills 从 assets/perfettokit/skills/ 自动加载
 
-        val ollamaBase = "http://10.xxx:11434/v1"         // 真机：换成你 Mac 的 IP
+        val ollamaBase = "http://10.1xxxx:11434/v1"         // 真机：换成你 Mac 的 IP
 
 
         PerfettoKit.init(this, PerfettoKit.Config(

@@ -54,33 +54,44 @@ object PerfettoKit {
     private var anomalyDetector: AnomalyDetector? = null
     private var autoSceneDetector: AutoSceneDetector? = null
     private var sessionStore: SessionStore? = null
+    private var autoInitPending = false
 
     /**
      * 自动初始化（由 PerfettoKitInitializer ContentProvider 调用）。
-     * 使用默认配置。如果开发者已经手动 init，此调用会被跳过。
+     * 仅记录 Application 引用，延迟到首次使用时再以默认配置初始化。
+     * 如果开发者在 Application.onCreate 中手动调用 init()，则 auto-init 不会执行。
      */
     internal fun autoInit(application: Application) {
         if (initialized) return
-        Log.d(TAG, "PerfettoKit auto-initializing via ContentProvider")
-        init(application, Config())
+        app = application
+        autoInitPending = true
+        Log.d(TAG, "PerfettoKit: ContentProvider registered, waiting for manual init or first use")
+    }
+
+    /**
+     * 如果开发者没有手动调用 init()，在首次使用 SDK（startSession 等）时
+     * 以默认配置完成初始化。
+     */
+    private fun ensureInitialized() {
+        if (initialized) return
+        if (autoInitPending && app != null) {
+            Log.d(TAG, "PerfettoKit auto-initializing with default config (no manual init called)")
+            init(app!!, Config())
+        } else {
+            throw IllegalStateException("PerfettoKit.init() must be called first")
+        }
     }
 
     /**
      * 手动初始化 SDK — 开发者可传入自定义配置。
      *
-     * 如果在 Application.onCreate 中调用此方法，ContentProvider 的自动初始化会被跳过
-     * （因为 init 内部有 initialized 防重入）。
-     *
-     * 注意: ContentProvider.onCreate 先于 Application.onCreate 执行，
-     * 所以如果需要自定义配置，请在 Manifest 中禁用自动初始化：
-     *   <provider android:name="io.github.perfettokit.PerfettoKitInitializer"
-     *       android:authorities="${applicationId}.perfettokit-init"
-     *       tools:node="remove" />
-     * 然后在 Application.onCreate 中手动调用 init(app, config)。
+     * 可在 Application.onCreate 中调用，无需禁用 ContentProvider。
+     * 如果 ContentProvider 已注册，本方法会覆盖默认配置并完成初始化。
      */
     fun init(application: Application, config: Config = Config()) {
         if (initialized) return
         app = application
+        autoInitPending = false
         reporter = config.reporter
         appPackagePrefix = config.appPackagePrefix.ifEmpty {
             application.packageName
@@ -115,7 +126,7 @@ object PerfettoKit {
      * - 手动标记的 Session 不受影响，两者互不干扰
      */
     fun enableAutoDetect(config: AutoSceneDetector.Config = AutoSceneDetector.Config()) {
-        check(initialized) { "PerfettoKit.init() must be called first" }
+        ensureInitialized()
         val application = app ?: return
         autoSceneDetector = AutoSceneDetector(application, config).also {
             it.start { scene -> beginSession(scene) }
@@ -138,7 +149,7 @@ object PerfettoKit {
      * @param rules 可选，仅对此 session 生效的规则；为空则使用全局规则
      */
     fun beginSession(scene: String, rules: List<Rule>? = null): TraceSession {
-        check(initialized) { "PerfettoKit.init() must be called first" }
+        ensureInitialized()
         // 如果有旧 session 还在跑，先结束
         currentSession?.end()
         val effectiveRules = rules ?: globalRules
