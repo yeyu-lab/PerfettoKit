@@ -203,6 +203,24 @@ object PerfettoKit {
     }
 
     /**
+     * 轻量级方法计时 — 每次调用都记录耗时，支持历史统计。
+     * 适用于短耗时方法（几毫秒），不启动完整采集流水线。
+     *
+     * PerfettoKit.trace("Adapter.onBind") {
+     *     bindData(holder, position)
+     * }
+     *
+     * // 查看统计
+     * PerfettoKit.dumpTrace()
+     */
+    inline fun <T> trace(tag: String, block: () -> T): T = MethodTracer.trace(tag, block)
+
+    /**
+     * 输出所有方法耗时统计到 Logcat。
+     */
+    fun dumpTrace() = MethodTracer.dump()
+
+    /**
      * 获取已加载的 Skills 列表（调试用）。
      */
     fun getLoadedSkills(): List<Skill> = skills

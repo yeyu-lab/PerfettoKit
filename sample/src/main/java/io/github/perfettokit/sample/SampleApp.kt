@@ -29,7 +29,7 @@ class SampleApp : Application() {
         // 自动检测 Activity 启动 + RecyclerView 滑动
         PerfettoKit.enableAutoDetect(AutoSceneDetector.Config(
             detectLaunch = true,
-            detectScroll = false  // 已在 MainActivity 中手动 beginSession("list_scroll")，避免重复
+            detectScroll = false  // 已在 MainActivity 中手动 beginSession(t"list_scroll")，避免重复
         ))
     }
 }
