@@ -44,8 +44,64 @@ class LogcatReporter(
             msgStats.totalSlowDurationMs, msgStats.maxDurationMs
         ))
 
-        // ═══════════ 卡顿元凶 Top (最有价值，前置) ═══════════
-        if (msgStats.topSlowMethods.isNotEmpty()) {
+        // ═══════════ 主线程瓶颈 Top (统一排名，最有价值) ═══════════
+        val unifiedRanking = report.unifiedMethodRanking
+        if (unifiedRanking.isNotEmpty()) {
+            Log.i(tag, "")
+            Log.i(tag, "【主线程瓶颈 Top %d】(proportionRatio × 掉帧帧数 排名)".format(unifiedRanking.size))
+            unifiedRanking.forEach { entry ->
+                val slowTag = if (entry.slowHitCount > 0) "慢${entry.slowHitCount}次" else ""
+                val warmTag = if (entry.warmHitCount > 0) "温${entry.warmHitCount}次" else ""
+                val countDesc = listOf(slowTag, warmTag).filter { it.isNotEmpty() }.joinToString(" | ").ifEmpty { "影响" }
+                val ratioDesc = "%.1fx".format(entry.proportionRatio)
+                Log.e(tag, "   🎯 ${entry.displayName}")
+                Log.e(tag, "      $countDesc | 影响${entry.jankFrameCount}/${entry.totalJankFrames}帧 | 比值$ratioDesc | 均%.1fms, 峰值${entry.maxDurationMs}ms [${entry.category.label}]".format(entry.avgDurationMs))
+                if (entry.childMethods.isNotEmpty()) {
+                    // 按基类分组展示子方法 (lambda内部类归属到基类), 按时间贡献排序
+                    val parentBaseCls = entry.method.substringBefore('.').substringBefore('$')
+                    // 构建 method → contribution 映射
+                    val contribMap = entry.childMethods.zip(entry.childContributions).toMap()
+
+                    val grouped = entry.childMethods.groupBy {
+                        it.substringBefore('.').substringBefore('$')
+                    }
+                    // 按组内最大贡献度排序
+                    val sortedGroups = grouped.entries
+                        .sortedByDescending { (_, methods) -> methods.maxOfOrNull { contribMap[it] ?: 0f } ?: 0f }
+
+                    // 先展示跨类调用 (不同于 parent 的类), 限制 Top 5 组
+                    var groupCount = 0
+                    for ((cls, methods) in sortedGroups) {
+                        if (cls == parentBaseCls) continue
+                        if (groupCount >= 5) break
+                        // 取该组贡献最大的方法名 + 百分比
+                        val sortedMethods = methods.sortedByDescending { contribMap[it] ?: 0f }
+                        val display = sortedMethods.take(3).map { m ->
+                            val pct = ((contribMap[m] ?: 0f) * 100).toInt()
+                            val name = m.substringAfter('.')
+                            if (pct > 0) "$name(${pct}%)" else name
+                        }
+                        Log.w(tag, "      └ $cls: ${display.joinToString(", ")}")
+                        groupCount++
+                    }
+                    // 再展示同类子方法
+                    val sameClassMethods = grouped[parentBaseCls]
+                    if (sameClassMethods != null && sameClassMethods.isNotEmpty()) {
+                        val sortedMethods = sameClassMethods.sortedByDescending { contribMap[it] ?: 0f }
+                        val display = sortedMethods.take(3).map { m ->
+                            val pct = ((contribMap[m] ?: 0f) * 100).toInt()
+                            val name = m.substringAfter('.')
+                            if (pct > 0) "$name(${pct}%)" else name
+                        }
+                        Log.w(tag, "      └ $parentBaseCls: ${display.joinToString(", ")}")
+                    }
+                }
+                if (entry.callChain.isNotEmpty()) {
+                    Log.w(tag, "      链: ${entry.callChain.joinToString(" → ")}")
+                }
+            }
+        } else if (msgStats.topSlowMethods.isNotEmpty()) {
+            // fallback: 没有统一排名时用旧的慢方法列表
             Log.i(tag, "")
             Log.i(tag, "【卡顿元凶 Top %d】(消息超时时抓栈确认 + 掉帧聚合)".format(
                 minOf(5, msgStats.topSlowMethods.size)
@@ -60,24 +116,25 @@ class LogcatReporter(
             }
         }
 
-        // 基于栈采样的掉帧耗时归因
+        // 基于栈采样的掉帧耗时归因 (精简版: 只展示 pipeline 级别概况)
         val attr = msgStats.jankAttribution
         if (attr.stackBasedContributors.isNotEmpty()) {
             Log.i(tag, "")
             Log.i(tag, "【掉帧耗时归因】(基于5ms栈采样, 按时间占比)")
-            attr.stackBasedContributors.forEach { c ->
+            // 只展示系统管线 + app 热点方法, 限制 Top 4
+            attr.stackBasedContributors.take(4).forEach { c ->
                 val icon = when {
                     c.isPureSystemHotspot -> "🔧"
                     c.isAppMethod -> "📱"
                     else -> "⚙️"
                 }
                 if (c.isPureSystemHotspot) {
-                    Log.w(tag, "   $icon ${c.method} — 无App代码热点, 出现率%.1f%%, 均%.1fms, 峰值%.0fms".format(
-                        c.jankFrameAppearanceRate * 100, c.jankFrameAvgMs, c.maxEstimatedMs
+                    Log.w(tag, "   $icon ${c.method} — 出现率%.1f%%, 峰值%.0fms".format(
+                        c.jankFrameAppearanceRate * 100, c.maxEstimatedMs
                     ))
                 } else {
-                    Log.w(tag, "   $icon ${c.method} — 占比%.1f%% (正常%.1f%%, %.1fx), 出现率%.1f%%, 峰值%.0fms".format(
-                        c.jankProportion * 100, c.normalProportion * 100, c.proportionRatio, c.jankFrameAppearanceRate * 100, c.maxEstimatedMs
+                    Log.w(tag, "   $icon ${c.method} — 占比%.1f%% (%.1fx), 出现率%.1f%%".format(
+                        c.jankProportion * 100, c.proportionRatio, c.jankFrameAppearanceRate * 100
                     ))
                 }
             }
@@ -129,36 +186,25 @@ class LogcatReporter(
         }
         Log.i(tag, "")
         Log.i(tag, "【主线程】")
-        Log.i(tag, "   CPU: %.1f%% | 活跃率: %.0f%% | 压力: %s".format(
-            mainCpu,
-            report.threadStats.mainThreadRunnableRatio * 100,
-            mainPressure
-        ))
-
-        val mainMethods = report.mainThreadStats.topMethods
         val breakdown = report.mainThreadStats.samplingBreakdown
-        if (mainMethods.isNotEmpty()) {
-            Log.i(tag, "   时间消耗 Top:")
-            mainMethods.take(5).forEach { m ->
-                val icon = when (m.category) {
-                    "app" -> "📱"
-                    "rendering" -> "🎨"
-                    "thirdparty" -> "📦"
-                    else -> "⚙️"
-                }
-                Log.w(tag, "     $icon ${m.method} (%.1f%%)".format(m.percentage))
-            }
-            if (breakdown.totalSamples > 0) {
-                val busySamples = breakdown.totalSamples - breakdown.idleSamples - breakdown.emptyStackSamples
-                val busyPercent = busySamples.toDouble() / breakdown.totalSamples * 100
-                val idlePercent = breakdown.idleSamples.toDouble() / breakdown.totalSamples * 100
-                Log.i(tag, "   采样: 共%d次 | 空闲%.0f%% | 繁忙%.0f%% (📱%d ⚙️%d 🎨%d 📦%d) | 方法%d个".format(
-                    breakdown.totalSamples, idlePercent, busyPercent,
-                    breakdown.appMethodSamples, breakdown.systemMethodSamples,
-                    breakdown.renderingMethodSamples, breakdown.thirdpartyMethodSamples,
-                    breakdown.uniqueMethodCount
-                ))
-            }
+        if (breakdown.totalSamples > 0) {
+            val busySamples = breakdown.totalSamples - breakdown.idleSamples - breakdown.emptyStackSamples
+            val busyPercent = busySamples.toDouble() / breakdown.totalSamples * 100
+            val idlePercent = breakdown.idleSamples.toDouble() / breakdown.totalSamples * 100
+            Log.i(tag, "   CPU: %.1f%% | 活跃率: %.0f%% | 压力: %s | 采样%d次 (📱%d ⚙️%d 🎨%d 📦%d)".format(
+                mainCpu,
+                report.threadStats.mainThreadRunnableRatio * 100,
+                mainPressure,
+                breakdown.totalSamples,
+                breakdown.appMethodSamples, breakdown.systemMethodSamples,
+                breakdown.renderingMethodSamples, breakdown.thirdpartyMethodSamples
+            ))
+        } else {
+            Log.i(tag, "   CPU: %.1f%% | 活跃率: %.0f%% | 压力: %s".format(
+                mainCpu,
+                report.threadStats.mainThreadRunnableRatio * 100,
+                mainPressure
+            ))
         }
 
         // 帧阶段分析
@@ -200,21 +246,6 @@ class LogcatReporter(
                     attr.avgMsgsPerJankFrame, attr.avgMsgsPerNormalFrame
                 ))
                 Log.i(tag, "     平均超预算: %.1fms/帧".format(attr.avgOverbudgetMs))
-
-                // 累积型掉帧归因
-                if (attr.topMultiMsgContributors.isNotEmpty()) {
-                    Log.i(tag, "   累积型归因 (%d帧, 其中%d帧无慢消息):".format(
-                        attr.multiMsgStackFrames, attr.pureAccumulationFrames
-                    ))
-                    attr.topMultiMsgContributors.forEach { c ->
-                        Log.w(tag, "     ${c.method} — 出现率%.1f%% (%d/%d帧), 均%.1fms".format(
-                            c.appearanceRate * 100, c.appearanceCount, attr.multiMsgStackFrames, c.avgDurationMs
-                        ))
-                        if (c.callChain.isNotEmpty()) {
-                            Log.d(tag, "       链: ${c.callChain.joinToString(" → ")}")
-                        }
-                    }
-                }
             }
 
             // 类别分布
@@ -274,6 +305,23 @@ class LogcatReporter(
                     Log.d(tag, "   $line")
                 }
             }
+        }
+
+        // GfxInfo 风格统计 (等价 dumpsys gfxinfo 输出)
+        val gfx = report.gfxFrameStats
+        if (gfx.totalFrames > 0) {
+            Log.i(tag, "")
+            Log.i(tag, "【帧统计】(等价 dumpsys gfxinfo, %.0fHz)".format(gfx.displayRefreshRate))
+            Log.i(tag, "   Total frames: ${gfx.totalFrames} | Janky: ${gfx.jankFrames} (%.2f%%)".format(gfx.jankPercent))
+            Log.i(tag, "   P50: %.0fms | P90: %.0fms | P95: %.0fms | P99: %.0fms".format(
+                gfx.percentile50Ms, gfx.percentile90Ms, gfx.percentile95Ms, gfx.percentile99Ms
+            ))
+            Log.i(tag, "   Missed Vsync: ${gfx.missedVsync} | High input: ${gfx.highInputLatency} | Slow UI: ${gfx.slowUiThread}")
+            Log.i(tag, "   Slow bitmap uploads: ${gfx.slowBitmapUploads} | Slow draw cmds: ${gfx.slowDrawCommands}")
+            if (gfx.slowGpuCompletion > 0) {
+                Log.i(tag, "   Slow GPU completion: ${gfx.slowGpuCompletion}")
+            }
+            Log.i(tag, "   Score: ${gfx.smoothnessScore}/100 | Est.FPS: %.1f | Bottleneck: ${gfx.dominantBottleneck}".format(gfx.estimatedFps))
         }
 
         Log.i(tag, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

@@ -26,7 +26,7 @@ class AdvancedUsageActivity : AppCompatActivity() {
         // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
         val strictRules = listOf(
-            SlowFrameRule(thresholdMs = 8.0, severeThresholdMs = 16.67)  // 120fps 标准
+            SlowFrameRule(thresholdMs = 8.0, severeMultiplier = 2.0)  // 120fps 标准
         )
         val session = PerfettoKit.beginSession("high_fps_animation", rules = strictRules)
 

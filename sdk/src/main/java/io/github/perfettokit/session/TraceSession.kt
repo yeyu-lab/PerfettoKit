@@ -7,6 +7,7 @@ import android.util.Log
 import io.github.perfettokit.ai.LLMEnhancer
 import io.github.perfettokit.analyzer.AnalysisEngine
 import io.github.perfettokit.analyzer.MethodTracker
+import io.github.perfettokit.analyzer.RenderPipelineAnalyzer
 import io.github.perfettokit.analyzer.StackSampler
 import io.github.perfettokit.auto.AnomalyDetector
 import io.github.perfettokit.collector.AllocSample
@@ -22,11 +23,15 @@ import io.github.perfettokit.collector.FrameMetricsCollector
 import io.github.perfettokit.collector.FramePhaseData
 import io.github.perfettokit.collector.FramePhaseStats
 import io.github.perfettokit.collector.FramePhase
+import io.github.perfettokit.collector.GfxStatsCollector
 import io.github.perfettokit.collector.PhaseBottleneckEntry
+import io.github.perfettokit.collector.RenderPipelineAnalysis
 import io.github.perfettokit.collector.IODetector
 import io.github.perfettokit.collector.IOEvent
 import io.github.perfettokit.collector.LooperMonitor
 import io.github.perfettokit.collector.LooperMonitorResult
+import io.github.perfettokit.collector.MessageCategory
+import io.github.perfettokit.collector.UnifiedMethodImpact
 import io.github.perfettokit.collector.CumulativeJankContributor
 import io.github.perfettokit.collector.JankFrameAttribution
 import io.github.perfettokit.collector.MessageTiming
@@ -94,7 +99,10 @@ class TraceSession internal constructor(
     private val bitmapDetector = BitmapDetector()
     private val analysisEngine = AnalysisEngine()
     private var ended = false
-    @Volatile private var lastReport: DiagnosisReport? = null
+    @Volatile private var lastReportInternal: DiagnosisReport? = null
+
+    /** 获取最近一次 end() 后的诊断报告 (未 end 时为 null)。 */
+    fun lastReport(): DiagnosisReport? = lastReportInternal
 
     /**
      * 方法耗时追踪器 — 开发者可对可疑方法手动插桩。
@@ -130,13 +138,13 @@ class TraceSession internal constructor(
      */
     fun endAsync(callback: (DiagnosisReport) -> Unit) {
         if (ended) {
-            lastReport?.let { callback(it) }
+            lastReportInternal?.let { callback(it) }
             return
         }
         val rawData = stopCollectors()
         Thread({
             val report = analyzeAndBuildReport(rawData)
-            lastReport = report
+            lastReportInternal = report
             callback(report)
         }, "PerfettoKit-Analyze").start()
     }
@@ -146,10 +154,10 @@ class TraceSession internal constructor(
      * 停止采集在调用线程，分析在后台线程，阻塞等待结果。
      */
     fun end(): DiagnosisReport {
-        lastReport?.let { return it }
+        lastReportInternal?.let { return it }
         val rawData = stopCollectors()
         val report = analyzeAndBuildReport(rawData)
-        lastReport = report
+        lastReportInternal = report
         return report
     }
 
@@ -253,10 +261,14 @@ class TraceSession internal constructor(
         val mainThreadStats = computeMainThreadStats(cpuSamples, durationMs, threadStats, stackSamples)
 
         // 帧阶段分析 (FrameMetrics API 24+)
-        val framePhaseStats = computeFramePhaseStats(data.framePhaseData, frames)
+        val frameBudgetMs = frameMetricsCollector.frameBudgetMs
+        val framePhaseStats = computeFramePhaseStats(data.framePhaseData, frames, frameBudgetMs)
 
         // Looper 消息监控统计 — 关联掉帧数据
         val slowMessageStats = computeSlowMessageStats(data.looperResult, frames, stackSamples)
+
+        // 统一方法影响度排名 — 合并慢消息+温消息
+        val unifiedRanking = computeUnifiedMethodRanking(data.looperResult, frames, stackSamples, slowMessageStats)
 
         // 掉帧归因 — 每一帧掉帧时到底是什么导致的
         val jankFrameDetails = attributeJankFrames(frames, stackSamples, ioEvents, allocSamples)
@@ -268,7 +280,9 @@ class TraceSession internal constructor(
             durationMs = durationMs,
             cpuStats = cpuStats,
             memoryStats = memoryStats,
-            threadStats = threadStats
+            threadStats = threadStats,
+            framePhaseData = data.framePhaseData,
+            frameBudgetMs = frameBudgetMs
         )
         val issues = rules.flatMap { rule -> rule.evaluate(ruleContext) }.toMutableList()
 
@@ -323,7 +337,9 @@ class TraceSession internal constructor(
             threadStats = threadStats,
             networkStats = networkStats,
             ioEvents = ioEvents,
-            allocSamples = allocSamples
+            allocSamples = allocSamples,
+            framePhaseData = data.framePhaseData,
+            frameBudgetMs = frameBudgetMs
         )
 
         // 帧统计
@@ -341,6 +357,10 @@ class TraceSession internal constructor(
         } else {
             FrameStats(avgMs = 0.0, maxMs = 0.0, jankCount = 0, jankRatio = 0.0)
         }
+
+        // GfxInfo 风格帧统计 (等价 dumpsys gfxinfo)
+        val gfxStatsCollector = GfxStatsCollector()
+        val gfxFrameStats = gfxStatsCollector.compute(data.framePhaseData, frameBudgetMs, frameMetricsCollector.displayRefreshRate)
 
         // 第三层：异常自学习 — 与基线对比
         val report = DiagnosisReport(
@@ -360,7 +380,9 @@ class TraceSession internal constructor(
             mainThreadStats = mainThreadStats,
             jankFrameDetails = jankFrameDetails,
             framePhaseStats = framePhaseStats,
-            slowMessageStats = slowMessageStats
+            slowMessageStats = slowMessageStats,
+            unifiedMethodRanking = unifiedRanking,
+            gfxFrameStats = gfxFrameStats
         )
 
         anomalyDetector?.let { detector ->
@@ -763,7 +785,35 @@ class TraceSession internal constructor(
         stackSamples: List<StackSampler.StackSample>
     ): SlowMessageStats {
         val messages = looperResult.slowMessages
-        if (messages.isEmpty()) return SlowMessageStats(totalMessageCount = looperResult.totalMessageCount)
+        val warmMsgs = looperResult.warmMessages
+
+        // 温消息统计: 按 target 分组
+        val warmMethodHits = mutableMapOf<String, MutableList<io.github.perfettokit.collector.WarmMessage>>()
+        for (msg in warmMsgs) {
+            val key = msg.shortTarget()
+            warmMethodHits.getOrPut(key) { mutableListOf() }.add(msg)
+        }
+        val topWarmMethods = warmMethodHits.entries
+            .sortedByDescending { it.value.sumOf { m -> m.durationMs } }
+            .take(20)
+            .map { (method, msgs) ->
+                io.github.perfettokit.collector.WarmMethodEntry(
+                    method = method,
+                    hitCount = msgs.size,
+                    totalDurationMs = msgs.sumOf { it.durationMs },
+                    avgDurationMs = msgs.map { it.durationMs.toDouble() }.average(),
+                    maxDurationMs = msgs.maxOf { it.durationMs },
+                    category = msgs.first().category
+                )
+            }
+
+        if (messages.isEmpty()) {
+            return SlowMessageStats(
+                totalMessageCount = looperResult.totalMessageCount,
+                totalWarmMessages = warmMsgs.size,
+                topWarmMethods = topWarmMethods
+            )
+        }
 
         val jankThresholdMs = detectJankThreshold(frames)
 
@@ -859,14 +909,378 @@ class TraceSession internal constructor(
         return SlowMessageStats(
             totalMessageCount = looperResult.totalMessageCount,
             totalSlowMessages = messages.size,
+            totalWarmMessages = warmMsgs.size,
             totalJankFrames = totalJankFrames,
             jankFramesCoveredBySlowMsg = allCoveredJankFrames,
             totalSlowDurationMs = messages.sumOf { it.durationMs },
             maxDurationMs = messages.maxOf { it.durationMs },
             topSlowMethods = topSlowMethods,
+            topWarmMethods = topWarmMethods,
             categoryBreakdown = categoryBreakdown,
             jankAttribution = jankAttribution
         )
+    }
+
+    /**
+     * 统一方法影响度排名 — 合并慢消息(>8ms)和温消息(2~8ms)。
+     *
+     * 核心逻辑:
+     * 1. 慢消息: 已有栈抓取确认的 app 方法 + jankFrameCount
+     * 2. 温消息: 通过时间窗口关联 StackSampler 采样，提取真正的 app 方法
+     * 3. 调用者聚合：叶子方法合并到其主要调用者
+     * 4. 按 proportionRatio × jankFrameCount 排序
+     */
+    private fun computeUnifiedMethodRanking(
+        looperResult: LooperMonitorResult,
+        frames: List<FrameData>,
+        stackSamples: List<io.github.perfettokit.analyzer.StackSampler.StackSample>,
+        slowMessageStats: SlowMessageStats
+    ): List<UnifiedMethodImpact> {
+        val jankThresholdMs = detectJankThreshold(frames)
+        val sortedFrames = frames.sortedBy { it.timestampMs }
+
+        // 构建帧起止时间
+        val frameStartMap = mutableMapOf<Long, Long>()
+        for (i in sortedFrames.indices) {
+            val end = sortedFrames[i].timestampMs
+            frameStartMap[end] = if (i > 0) sortedFrames[i - 1].timestampMs
+                else end - sortedFrames[i].totalDurationMs.toLong()
+        }
+        val jankWindows = sortedFrames
+            .filter { it.totalDurationMs > jankThresholdMs }
+            .map { frame ->
+                val end = frame.timestampMs
+                val start = frameStartMap[end] ?: (end - frame.totalDurationMs.toLong())
+                start to end
+            }
+        val normalWindows = sortedFrames
+            .filter { it.totalDurationMs <= jankThresholdMs }
+            .map { frame ->
+                val end = frame.timestampMs
+                val start = frameStartMap[end] ?: (end - frame.totalDurationMs.toLong())
+                start to end
+            }
+        val totalJankFrames = jankWindows.size
+        val totalNormalFrames = normalWindows.size
+        if (totalJankFrames == 0) return emptyList()
+
+        // ═══ 栈采样按时间排序 + 二分查找工具 ═══
+        val sortedSamples = stackSamples.sortedBy { it.timestampMs }
+        val sampleTimestamps = sortedSamples.map { it.timestampMs }.toLongArray()
+
+        fun findSamplesInWindow(start: Long, end: Long): IntRange {
+            var lo = sampleTimestamps.toList().binarySearch(start)
+            if (lo < 0) lo = -(lo + 1)
+            var hi = sampleTimestamps.toList().binarySearch(end)
+            if (hi < 0) hi = -(hi + 1) - 1
+            return lo..hi
+        }
+
+        // ═══ Part 1: 从栈采样统计方法在 jank/normal 帧中的出现 ═══
+        // 记录: method → 出现的 jank帧索引集合, normal帧索引集合
+        val methodJankFrames = mutableMapOf<String, MutableSet<Int>>()
+        val methodNormalFrames = mutableMapOf<String, MutableSet<Int>>()
+        // 调用者关系: leafMethod → (callerMethod → 次数)
+        val callerRelations = mutableMapOf<String, MutableMap<String, Int>>()
+        // 方法共现: 记录每个方法出现的掉帧采样索引 (用于计算子方法时间贡献)
+        val methodJankSamples = mutableMapOf<String, MutableSet<Int>>()
+        var jankSampleCounter = 0
+
+        fun extractAppMethods(sample: io.github.perfettokit.analyzer.StackSampler.StackSample): List<String> {
+            val methods = mutableListOf<String>()
+            for (frame in sample.stackTrace) {
+                if (isAppFrame(frame)) {
+                    methods.add("${frame.className.substringAfterLast('.')}.${frame.methodName}")
+                }
+            }
+            return methods // 栈顶(叶子)在前，栈底(入口)在后
+        }
+
+        // 统计掉帧帧
+        for ((idx, window) in jankWindows.withIndex()) {
+            val (start, end) = window
+            val range = findSamplesInWindow(start, end)
+            for (i in range) {
+                if (i !in sortedSamples.indices) continue
+                val appMethods = extractAppMethods(sortedSamples[i])
+                val sampleId = jankSampleCounter++
+                for (method in appMethods) {
+                    methodJankFrames.getOrPut(method) { mutableSetOf() }.add(idx)
+                    methodJankSamples.getOrPut(method) { mutableSetOf() }.add(sampleId)
+                }
+                // 记录调用者关系: 第0个(叶子)的caller是第1个, 第1个的caller是第2个...
+                for (j in 0 until appMethods.size - 1) {
+                    val leaf = appMethods[j]
+                    val caller = appMethods[j + 1]
+                    callerRelations.getOrPut(leaf) { mutableMapOf() }
+                        .merge(caller, 1) { a, b -> a + b }
+                }
+            }
+        }
+
+        // 统计正常帧 (最多200帧)
+        val normalSampleSize = minOf(normalWindows.size, 200)
+        for ((idx, window) in normalWindows.take(normalSampleSize).withIndex()) {
+            val (start, end) = window
+            val range = findSamplesInWindow(start, end)
+            for (i in range) {
+                if (i !in sortedSamples.indices) continue
+                val appMethods = extractAppMethods(sortedSamples[i])
+                for (method in appMethods) {
+                    methodNormalFrames.getOrPut(method) { mutableSetOf() }.add(idx)
+                }
+            }
+        }
+
+        // ═══ Part 2: 合并慢消息 + 温消息的耗时信息 ═══
+        data class MethodAccumulator(
+            var slowCount: Int = 0,
+            var warmCount: Int = 0,
+            var totalDurationMs: Long = 0,
+            var maxDurationMs: Long = 0,
+            var category: MessageCategory = MessageCategory.OTHER,
+            var callChain: List<String> = emptyList()
+        )
+
+        val methodMap = mutableMapOf<String, MethodAccumulator>()
+
+        // 从 slowMessageStats 中获取慢消息方法
+        for (entry in slowMessageStats.topSlowMethods) {
+            val acc = methodMap.getOrPut(entry.method) { MethodAccumulator() }
+            acc.slowCount = entry.hitCount
+            acc.totalDurationMs += (entry.avgDurationMs * entry.hitCount).toLong()
+            acc.maxDurationMs = maxOf(acc.maxDurationMs, entry.maxDurationMs)
+            acc.category = entry.category
+            acc.callChain = entry.callChain
+        }
+
+        // 温消息关联栈采样
+        if (sortedSamples.isNotEmpty() && looperResult.warmMessages.isNotEmpty()) {
+            for (warmMsg in looperResult.warmMessages) {
+                val msgStart = warmMsg.startTimeMs
+                val msgEnd = warmMsg.startTimeMs + warmMsg.durationMs
+
+                val range = findSamplesInWindow(msgStart, msgEnd)
+                val leafMethods = mutableSetOf<String>() // 只记录叶子方法 (栈顶)
+                val allAppMethods = mutableSetOf<String>()
+                for (i in range) {
+                    if (i !in sortedSamples.indices) continue
+                    val methods = extractAppMethods(sortedSamples[i])
+                    if (methods.isNotEmpty()) {
+                        leafMethods.add(methods.first()) // 栈顶 = 叶子
+                    }
+                    allAppMethods.addAll(methods)
+                }
+
+                if (allAppMethods.isEmpty()) continue
+                // warmCount + 耗时只给叶子方法 (避免整条调用链膨胀, 且保证 avg <= max)
+                val durationPerLeaf = warmMsg.durationMs / maxOf(leafMethods.size, 1)
+                for (method in leafMethods) {
+                    val acc = methodMap.getOrPut(method) { MethodAccumulator() }
+                    acc.warmCount++
+                    acc.totalDurationMs += durationPerLeaf
+                    acc.maxDurationMs = maxOf(acc.maxDurationMs, warmMsg.durationMs)
+                    if (acc.category == MessageCategory.OTHER) {
+                        acc.category = warmMsg.category
+                    }
+                }
+            }
+        }
+
+        // ═══ Part 3: 调用者聚合 — 叶子方法合并到主要调用者 ═══
+        // 规则: 如果方法 A 的采样中 >60% 都有同一个 caller B，且 B 也是 app 方法，则合并 A → B
+        val mergedInto = mutableMapOf<String, String>() // leafMethod → targetCaller
+        val childrenOf = mutableMapOf<String, MutableList<String>>() // caller → list of merged children
+
+        for ((leaf, callers) in callerRelations) {
+            val totalAppearances = callers.values.sum()
+            if (totalAppearances < 3) continue // 样本太少不合并
+            val (topCaller, topCount) = callers.maxByOrNull { it.value } ?: continue
+            if (topCount.toDouble() / totalAppearances > 0.6) {
+                // 叶子方法超过60%的出现都来自同一个caller → 合并
+                mergedInto[leaf] = topCaller
+                childrenOf.getOrPut(topCaller) { mutableListOf() }.add(leaf)
+            }
+        }
+
+        // 传递合并：如果 A→B 且 B→C，则 A 最终归入 C
+        fun resolveTarget(method: String): String {
+            var target = method
+            val visited = mutableSetOf<String>()
+            while (target in mergedInto && target !in visited) {
+                visited.add(target)
+                target = mergedInto[target]!!
+            }
+            return target
+        }
+        // 重建: 所有被合并的方法指向最终 target
+        val finalMergedInto = mutableMapOf<String, String>()
+        val finalChildrenOf = mutableMapOf<String, MutableList<String>>()
+        for (leaf in mergedInto.keys) {
+            val finalTarget = resolveTarget(leaf)
+            if (finalTarget != leaf) {
+                finalMergedInto[leaf] = finalTarget
+                finalChildrenOf.getOrPut(finalTarget) { mutableListOf() }.add(leaf)
+            }
+        }
+
+        // 将被合并的方法的 jankFrames 和 counts 转移到最终 target
+        for ((leaf, caller) in finalMergedInto) {
+            // 转移帧统计
+            methodJankFrames[leaf]?.let { frames ->
+                methodJankFrames.getOrPut(caller) { mutableSetOf() }.addAll(frames)
+            }
+            methodNormalFrames[leaf]?.let { frames ->
+                methodNormalFrames.getOrPut(caller) { mutableSetOf() }.addAll(frames)
+            }
+            // 转移耗时统计
+            val leafAcc = methodMap[leaf]
+            if (leafAcc != null) {
+                val callerAcc = methodMap.getOrPut(caller) { MethodAccumulator() }
+                callerAcc.warmCount += leafAcc.warmCount
+                callerAcc.totalDurationMs += leafAcc.totalDurationMs
+                callerAcc.maxDurationMs = maxOf(callerAcc.maxDurationMs, leafAcc.maxDurationMs)
+                if (callerAcc.category == MessageCategory.OTHER) {
+                    callerAcc.category = leafAcc.category
+                }
+            }
+        }
+
+        // ═══ Part 4: 过滤基础设施方法 + 计算 proportionRatio 并排名 ═══
+        // 日志/toString/网络底层等不应出现在排名中
+        fun isInfrastructureMethod(method: String): Boolean {
+            val lower = method.lowercase()
+            return lower.contains("log") ||  // Log.i, Xlog.logWrite2, WpkLogUtil.i, etc.
+                lower.endsWith(".tostring") ||
+                lower.endsWith(".hashcode") ||
+                lower.endsWith(".equals") ||
+                lower.endsWith(".clone") ||
+                lower.endsWith(".getclass") ||
+                lower.endsWith(".<init>") ||  // 构造函数
+                lower.contains("floatingdecimal") ||  // JDK 内部浮点
+                lower.contains("formattedfloa")
+        }
+
+        // 判断子方法是否应该展示 (排除非 app 类)
+        fun isDisplayableChild(method: String): Boolean {
+            if (isInfrastructureMethod(method)) return false
+            val cls = method.substringBefore('.')
+            // 排除明显的系统/框架短类名
+            if (cls.startsWith("R8") || cls.startsWith("\$r8\$")) return false
+            return true
+        }
+
+        val effectiveNormalFrames = maxOf(normalSampleSize, 1)
+        val candidateMethods = (methodMap.keys + methodJankFrames.keys)
+            .filter { it !in finalMergedInto } // 排除已被合并的叶子
+            .filter { !isInfrastructureMethod(it) } // 排除基础设施方法
+
+        // 简化方法名: lambda/coroutine → 可读的类名格式
+        // 例: "T2CameraEventLayout$onAttachedToWindow$1$1.invoke" → "T2CameraEventLayout (onAttachedToWindow)"
+        fun toDisplayName(method: String): String {
+            val cls = method.substringBefore('.')
+            val func = method.substringAfter('.')
+            return if ('$' in cls) {
+                // Lambda/内部类: 提取基类名和上下文方法
+                val baseCls = cls.substringBefore('$')
+                val context = cls.substringAfter('$').split('$')
+                    .firstOrNull { it.all { c -> c.isLetter() } && it.length > 1 }
+                if (context != null) {
+                    "$baseCls ($context)"
+                } else {
+                    "$baseCls.$func"
+                }
+            } else {
+                method
+            }
+        }
+
+        return candidateMethods
+            .mapNotNull { method ->
+                val acc = methodMap[method]
+                val jankFrameIndices = methodJankFrames[method] ?: emptySet()
+                val normalFrameIndices = methodNormalFrames[method] ?: emptySet()
+                val jankCount = jankFrameIndices.size
+                // 至少出现在3个掉帧帧中，或者慢消息+温消息 >= 3次
+                val totalHits = (acc?.slowCount ?: 0) + (acc?.warmCount ?: 0)
+                if (jankCount < 3 && totalHits < 3) return@mapNotNull null
+
+                val jankProportion = jankCount.toDouble() / totalJankFrames
+                val normalProportion = normalFrameIndices.size.toDouble() / effectiveNormalFrames
+
+                val proportionRatio = if (normalProportion > 0.01) {
+                    jankProportion / normalProportion
+                } else if (jankProportion > 0.02) {
+                    jankProportion / 0.01 // 正常帧几乎不出现 → 高嫌疑
+                } else {
+                    1.0
+                }
+
+                // 评分 = 影响帧数 × 比值 (比值越高说明越是掉帧专属)
+                val score = jankCount * proportionRatio
+
+                val totalCount = (acc?.slowCount ?: 0) + (acc?.warmCount ?: 0)
+                val avgMs = if (totalCount > 0 && acc != null) acc.totalDurationMs.toDouble() / totalCount else 0.0
+                val rawChildren = (finalChildrenOf[method] ?: emptyList())
+                    .filter { isDisplayableChild(it) }
+
+                // 计算子方法时间贡献: 子方法与 parent 在同一栈中的共现比率
+                val parentSamples = methodJankSamples[method]
+                val parentSampleCount = parentSamples?.size ?: 0
+                val childWithContribution = if (parentSampleCount > 0 && rawChildren.isNotEmpty()) {
+                    rawChildren.map { child ->
+                        val childSamples = methodJankSamples[child] ?: emptySet()
+                        // 共现 = child 的采样中有多少同时也是 parent 的采样
+                        val coOccurrence = childSamples.intersect(parentSamples!!).size
+                        val contribution = coOccurrence.toFloat() / parentSampleCount
+                        child to contribution
+                    }
+                    .filter { it.second > 0.01f } // 只保留占比 >1% 的
+                    .sortedByDescending { it.second }
+                } else {
+                    rawChildren.map { it to 0f }
+                }
+
+                val sortedChildren = childWithContribution.map { it.first }
+                val contributions = childWithContribution.map { it.second }
+
+                UnifiedMethodImpact(
+                    method = method,
+                    displayName = toDisplayName(method),
+                    slowHitCount = acc?.slowCount ?: 0,
+                    warmHitCount = acc?.warmCount ?: 0,
+                    jankFrameCount = jankCount,
+                    totalJankFrames = totalJankFrames,
+                    totalDurationMs = acc?.totalDurationMs ?: 0,
+                    avgDurationMs = avgMs,
+                    maxDurationMs = acc?.maxDurationMs ?: 0,
+                    category = acc?.category ?: MessageCategory.OTHER,
+                    callChain = acc?.callChain ?: emptyList(),
+                    proportionRatio = proportionRatio,
+                    childMethods = sortedChildren,
+                    childContributions = contributions,
+                    impactScore = score
+                )
+            }
+            .sortedByDescending { it.impactScore }
+            .take(10)
+    }
+
+    private fun isAppFrame(frame: StackTraceElement): Boolean {
+        val cls = frame.className
+        return !cls.startsWith("android.") &&
+            !cls.startsWith("com.android.") &&
+            !cls.startsWith("java.") &&
+            !cls.startsWith("javax.") &&
+            !cls.startsWith("kotlin.") &&
+            !cls.startsWith("kotlinx.") &&
+            !cls.startsWith("dalvik.") &&
+            !cls.startsWith("libcore.") &&
+            !cls.startsWith("sun.") &&
+            !cls.startsWith("androidx.") &&
+            !cls.startsWith("com.google.") &&
+            !cls.startsWith("io.github.perfettokit.") &&
+            !cls.startsWith("com.amplitude.")
     }
 
     /**
@@ -1285,7 +1699,8 @@ class TraceSession internal constructor(
      */
     private fun computeFramePhaseStats(
         phaseData: List<FramePhaseData>,
-        frames: List<FrameData>
+        frames: List<FrameData>,
+        frameBudgetMs: Double = 16.67
     ): FramePhaseStats {
         if (phaseData.isEmpty()) return FramePhaseStats()
 
@@ -1301,6 +1716,7 @@ class TraceSession internal constructor(
         val avgDraw = phaseData.map { it.drawMs }.average()
         val avgSync = phaseData.map { it.syncMs }.average()
         val avgCommand = phaseData.map { it.commandMs }.average()
+        val avgGpu = phaseData.map { it.gpuMs }.average()
 
         // 掉帧帧的瓶颈阶段分布
         val phaseBreakdown = if (jankPhaseFrames.isNotEmpty()) {
@@ -1316,6 +1732,7 @@ class TraceSession internal constructor(
                         FramePhase.DRAW -> group.map { it.drawMs }.average()
                         FramePhase.SYNC -> group.map { it.syncMs }.average()
                         FramePhase.COMMAND -> group.map { it.commandMs }.average()
+                        FramePhase.GPU -> group.map { it.gpuMs }.average()
                         else -> 0.0
                     }
                     PhaseBottleneckEntry(
@@ -1328,6 +1745,10 @@ class TraceSession internal constructor(
                 .sortedByDescending { it.percentage }
         } else emptyList()
 
+        // 渲染管线深度分析
+        val renderPipelineAnalyzer = RenderPipelineAnalyzer()
+        val renderPipelineAnalysis = renderPipelineAnalyzer.analyze(phaseData, frameBudgetMs)
+
         return FramePhaseStats(
             totalFrames = phaseData.size,
             jankFrames = jankPhaseFrames.size,
@@ -1337,7 +1758,11 @@ class TraceSession internal constructor(
             avgLayoutMs = avgLayout,
             avgDrawMs = avgDraw,
             avgSyncMs = avgSync,
-            avgCommandMs = avgCommand
+            avgCommandMs = avgCommand,
+            avgGpuMs = avgGpu,
+            displayRefreshRate = frameMetricsCollector.displayRefreshRate,
+            frameBudgetMs = frameBudgetMs,
+            renderPipelineAnalysis = renderPipelineAnalysis
         )
     }
 }

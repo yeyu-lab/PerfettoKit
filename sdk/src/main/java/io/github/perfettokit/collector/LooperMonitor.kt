@@ -22,12 +22,14 @@ import android.util.Printer
 class LooperMonitor {
 
     private val slowMessages = mutableListOf<SlowMessage>()
+    private val warmMessages = mutableListOf<WarmMessage>()  // 2ms~8ms 的轻量记录
     private val allMessages = mutableListOf<MessageTiming>()
     private var running = false
     private var originalPrinter: Printer? = null
     private var watchdogThread: HandlerThread? = null
     private var watchdogHandler: Handler? = null
-    private var thresholdMs: Long = 8L  // 默认 8ms (120Hz 帧预算)
+    private var thresholdMs: Long = 8L       // 慢消息阈值: 超过此值抓栈
+    private var recordThresholdMs: Long = 2L  // 记录阈值: 超过此值轻量记录(不抓栈)
     private var totalMessageCount: Long = 0  // 总消息数（所有消息，不只是超时的）
 
     // 当前消息的状态
@@ -51,12 +53,14 @@ class LooperMonitor {
 
     /**
      * 启动监控。
-     * @param thresholdMs 慢消息阈值，超过该时间的消息会被记录。默认 8ms (适配 120Hz)。
+     * @param thresholdMs 慢消息阈值，超过该时间的消息会抓栈记录。默认 8ms (适配 120Hz)。
+     * @param recordThresholdMs 轻量记录阈值，超过该时间记录 target + duration（不抓栈）。默认 2ms。
      */
-    fun start(thresholdMs: Long = 8L) {
+    fun start(thresholdMs: Long = 8L, recordThresholdMs: Long = 2L) {
         if (running) return
         running = true
         this.thresholdMs = thresholdMs
+        this.recordThresholdMs = recordThresholdMs
 
         // watchdog 线程: 在消息开始后延迟抓栈
         val thread = HandlerThread("PerfettoKit-LooperWatchdog").also { it.start() }
@@ -76,6 +80,7 @@ class LooperMonitor {
         watchdogHandler = null
         return LooperMonitorResult(
             slowMessages = synchronized(slowMessages) { slowMessages.toList() },
+            warmMessages = synchronized(warmMessages) { warmMessages.toList() },
             allMessages = synchronized(allMessages) { allMessages.toList() },
             totalMessageCount = totalMessageCount
         )
@@ -125,6 +130,19 @@ class LooperMonitor {
                         target = msgTarget,
                         category = category,
                         stackTraces = capturedStacks.toList()
+                    )
+                )
+            }
+        } else if (duration >= recordThresholdMs) {
+            // 轻量记录: 2ms~8ms 的消息，只记 target + duration，不抓栈
+            val category = categorizeMessage(msgTarget)
+            synchronized(warmMessages) {
+                warmMessages.add(
+                    WarmMessage(
+                        startTimeMs = msgStartTimeMs,
+                        durationMs = duration,
+                        target = msgTarget,
+                        category = category
                     )
                 )
             }
@@ -185,7 +203,39 @@ class LooperMonitor {
      */
     fun computeStats(result: LooperMonitorResult): SlowMessageStats {
         val messages = result.slowMessages
-        if (messages.isEmpty()) return SlowMessageStats(totalMessageCount = result.totalMessageCount)
+        val warmMsgs = result.warmMessages
+
+        // 温消息统计: 按 target 分组，统计出现次数和总耗时
+        val warmMethodHits = mutableMapOf<String, MutableList<WarmMessage>>()
+        for (msg in warmMsgs) {
+            val key = msg.shortTarget()
+            warmMethodHits.getOrPut(key) { mutableListOf() }.add(msg)
+        }
+        val topWarmMethods = warmMethodHits.entries
+            .sortedByDescending { it.value.sumOf { m -> m.durationMs } }
+            .take(20)
+            .map { (method, msgs) ->
+                WarmMethodEntry(
+                    method = method,
+                    hitCount = msgs.size,
+                    totalDurationMs = msgs.sumOf { it.durationMs },
+                    avgDurationMs = msgs.map { it.durationMs.toDouble() }.average(),
+                    maxDurationMs = msgs.maxOf { it.durationMs },
+                    category = msgs.first().category
+                )
+            }
+
+        if (messages.isEmpty() && warmMsgs.isEmpty()) {
+            return SlowMessageStats(totalMessageCount = result.totalMessageCount)
+        }
+
+        if (messages.isEmpty()) {
+            return SlowMessageStats(
+                totalMessageCount = result.totalMessageCount,
+                totalWarmMessages = warmMsgs.size,
+                topWarmMethods = topWarmMethods
+            )
+        }
 
         // 按方法分组统计
         val methodHits = mutableMapOf<String, MutableList<SlowMessage>>()
@@ -229,7 +279,9 @@ class LooperMonitor {
             totalSlowDurationMs = messages.sumOf { it.durationMs },
             maxDurationMs = messages.maxOf { it.durationMs },
             topSlowMethods = topSlowMethods,
-            categoryBreakdown = categoryBreakdown
+            categoryBreakdown = categoryBreakdown,
+            totalWarmMessages = warmMsgs.size,
+            topWarmMethods = topWarmMethods
         )
     }
 }
@@ -289,7 +341,8 @@ private fun isAppFrame(frame: StackTraceElement): Boolean {
         !cls.startsWith("sun.") &&
         !cls.startsWith("androidx.") &&
         !cls.startsWith("com.google.") &&
-        !cls.startsWith("io.github.perfettokit.")
+        !cls.startsWith("io.github.perfettokit.") &&
+        !cls.startsWith("com.amplitude.")
 }
 
 /**
@@ -312,10 +365,33 @@ data class MessageTiming(
 )
 
 /**
+ * 温消息记录 — 超过 recordThreshold 但未达 slowThreshold 的消息。
+ * 只记录 target 和耗时，不抓栈，开销极低。
+ */
+data class WarmMessage(
+    val startTimeMs: Long,
+    val durationMs: Long,
+    val target: String,
+    val category: MessageCategory
+) {
+    /**
+     * 从 target 提取短名用于统计分组。
+     */
+    fun shortTarget(): String {
+        // target 格式: "Handler (com.xxx.MyHandler) {hash} com.xxx.MyRunnable@hash"
+        // 提取最后一个有意义的类名
+        val parts = target.split(" ")
+        val runnablePart = parts.lastOrNull { it.contains(".") && !it.startsWith("{") }
+        return runnablePart?.substringBefore("@")?.substringAfterLast(".") ?: target.take(60)
+    }
+}
+
+/**
  * LooperMonitor 采集结果。
  */
 data class LooperMonitorResult(
     val slowMessages: List<SlowMessage>,
+    val warmMessages: List<WarmMessage>,   // 2ms~8ms 的轻量记录
     val allMessages: List<MessageTiming>,
     val totalMessageCount: Long
 )
@@ -325,12 +401,14 @@ data class LooperMonitorResult(
  */
 data class SlowMessageStats(
     val totalMessageCount: Long = 0,   // Session 期间主线程处理的总消息数
-    val totalSlowMessages: Int = 0,    // 超时消息数
+    val totalSlowMessages: Int = 0,    // 超时消息数 (>thresholdMs)
+    val totalWarmMessages: Int = 0,    // 温消息数 (recordThresholdMs ~ thresholdMs)
     val totalJankFrames: Int = 0,      // 总掉帧数（从帧数据关联）
     val jankFramesCoveredBySlowMsg: Int = 0, // 被慢消息覆盖的掉帧数
     val totalSlowDurationMs: Long = 0,
     val maxDurationMs: Long = 0,
     val topSlowMethods: List<SlowMethodEntry> = emptyList(),
+    val topWarmMethods: List<WarmMethodEntry> = emptyList(),  // 高频温方法 (>2ms)
     val categoryBreakdown: List<CategoryEntry> = emptyList(),
     val jankAttribution: JankFrameAttribution = JankFrameAttribution()
 ) {
@@ -351,6 +429,19 @@ data class SlowMethodEntry(
     val maxDurationMs: Long,
     val category: MessageCategory,
     val callChain: List<String>
+)
+
+/**
+ * 温方法条目 — 超过 recordThreshold(默认2ms) 但未达 slowThreshold 的高频方法。
+ * 这些方法单次不够慢，但累积是掉帧的主要原因。
+ */
+data class WarmMethodEntry(
+    val method: String,
+    val hitCount: Int,            // 出现次数
+    val totalDurationMs: Long,   // 总耗时
+    val avgDurationMs: Double,
+    val maxDurationMs: Long,
+    val category: MessageCategory
 )
 
 /**
@@ -402,4 +493,26 @@ data class StackBasedJankContributor(
     val jankFrameAppearanceRate: Double, // 在掉帧帧中出现率
     val isAppMethod: Boolean = false, // 是否为 app/三方代码（非系统框架）
     val isPureSystemHotspot: Boolean = false // 无 app 代码时的系统热点
+)
+
+/**
+ * 统一方法影响度排名 — 合并慢消息(>8ms)和温消息(2~8ms)的方法归因。
+ * 按对掉帧的总贡献度排序，解决温方法显示系统类名的问题。
+ */
+data class UnifiedMethodImpact(
+    val method: String,               // app 方法名 (ClassName.methodName)
+    val displayName: String = method,  // 可读展示名 (简化 lambda/coroutine 名称)
+    val slowHitCount: Int = 0,        // 慢消息(>8ms)中出现次数
+    val warmHitCount: Int = 0,        // 温消息(2~8ms)中关联到的次数 (通过栈采样)
+    val jankFrameCount: Int = 0,      // 影响的掉帧帧数
+    val totalJankFrames: Int = 0,     // 总掉帧帧数 (用于计算比率)
+    val totalDurationMs: Long = 0,    // 总耗时 (慢+温)
+    val avgDurationMs: Double = 0.0,  // 平均耗时
+    val maxDurationMs: Long = 0,      // 峰值
+    val category: MessageCategory = MessageCategory.OTHER,
+    val callChain: List<String> = emptyList(), // 调用链 (来自慢消息的栈抓取)
+    val proportionRatio: Double = 0.0, // 掉帧占比/正常占比 (>1 表示掉帧时更频繁)
+    val childMethods: List<String> = emptyList(), // 被聚合的子方法 (按时间贡献度排序)
+    val childContributions: List<Float> = emptyList(), // 对应每个 childMethod 的时间占比 (0~1)
+    val impactScore: Double = 0.0     // 影响度评分 = jankFrameCount × proportionRatio
 )

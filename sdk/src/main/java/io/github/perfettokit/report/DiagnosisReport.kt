@@ -7,11 +7,13 @@ import io.github.perfettokit.collector.AllocationStats
 import io.github.perfettokit.collector.BitmapStats
 import io.github.perfettokit.collector.CpuStats
 import io.github.perfettokit.collector.FramePhaseStats
+import io.github.perfettokit.collector.GfxFrameStats
 import io.github.perfettokit.collector.IOStats
 import io.github.perfettokit.collector.MemoryStats
 import io.github.perfettokit.collector.NetworkStats
 import io.github.perfettokit.collector.SlowMessageStats
 import io.github.perfettokit.collector.ThreadStats
+import io.github.perfettokit.collector.UnifiedMethodImpact
 
 /**
  * 诊断报告 — 一个 Session 结束后的完整分析结果。
@@ -38,7 +40,9 @@ data class DiagnosisReport(
     val mainThreadStats: MainThreadStats = MainThreadStats(),
     val jankFrameDetails: List<JankFrameDetail> = emptyList(),
     val framePhaseStats: FramePhaseStats = FramePhaseStats(),
-    val slowMessageStats: SlowMessageStats = SlowMessageStats()
+    val slowMessageStats: SlowMessageStats = SlowMessageStats(),
+    val unifiedMethodRanking: List<UnifiedMethodImpact> = emptyList(),
+    val gfxFrameStats: GfxFrameStats = GfxFrameStats()
 ) {
     val hasIssues: Boolean get() = issues.isNotEmpty()
     val rootCauses: List<RootCause> get() = analysis?.rootCauses ?: emptyList()

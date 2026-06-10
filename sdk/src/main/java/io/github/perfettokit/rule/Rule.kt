@@ -2,6 +2,7 @@ package io.github.perfettokit.rule
 
 import io.github.perfettokit.collector.CpuStats
 import io.github.perfettokit.collector.FrameData
+import io.github.perfettokit.collector.FramePhaseData
 import io.github.perfettokit.collector.MemoryStats
 import io.github.perfettokit.collector.ThreadStats
 import io.github.perfettokit.report.DiagnosisReport
@@ -15,7 +16,9 @@ data class RuleContext(
     val durationMs: Long,
     val cpuStats: CpuStats = CpuStats(),
     val memoryStats: MemoryStats = MemoryStats(),
-    val threadStats: ThreadStats = ThreadStats()
+    val threadStats: ThreadStats = ThreadStats(),
+    val framePhaseData: List<FramePhaseData> = emptyList(),
+    val frameBudgetMs: Double = 16.67
 )
 
 /**

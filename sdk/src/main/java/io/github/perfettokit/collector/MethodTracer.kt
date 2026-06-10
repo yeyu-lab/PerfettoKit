@@ -1,6 +1,7 @@
 package io.github.perfettokit.collector
 
 import android.os.SystemClock
+import android.util.Log
 import io.github.perfettokit.analyzer.MethodTracker
 import java.util.concurrent.ConcurrentHashMap
 
@@ -21,6 +22,7 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object MethodTracer {
 
+    private const val TAG = "PerfettoKit.Trace"
     private const val MAX_RECORDS = 5000
 
     // 当有活跃 session 时，直接委托给它的 MethodTracker
@@ -37,9 +39,16 @@ object MethodTracer {
     var enabled: Boolean = true
 
     /**
-     * inline 方式：自动计时并返回原函数结果
+     * 全局默认告警阈值（毫秒）。超过此值打 WARN 日志。默认 16ms。
      */
-    inline fun <T> trace(tag: String, block: () -> T): T {
+    @Volatile
+    var warnThresholdMs: Long = 16L
+
+    /**
+     * inline 方式：自动计时并返回原函数结果。
+     * @param thresholdMs 可选告警阈值，不传则使用全局 warnThresholdMs。
+     */
+    inline fun <T> trace(tag: String, thresholdMs: Long? = null, block: () -> T): T {
         if (!enabled) return block()
         val startNs = System.nanoTime()
         val startMs = SystemClock.elapsedRealtime()
@@ -47,7 +56,7 @@ object MethodTracer {
             return block()
         } finally {
             val durationMs = (System.nanoTime() - startNs) / 1_000_000.0
-            record(tag, startMs, durationMs)
+            record(tag, startMs, durationMs, thresholdMs)
         }
     }
 
@@ -75,8 +84,27 @@ object MethodTracer {
         record(tag, startMs, durationMs)
     }
 
+    // 每个 tag 的调用次数和总耗时（用于计算平均值）
+    private val callStats = ConcurrentHashMap<String, LongArray>() // [count, totalNs(x100)]
+
     @PublishedApi
-    internal fun record(tag: String, startTimeMs: Long, durationMs: Double) {
+    internal fun record(tag: String, startTimeMs: Long, durationMs: Double, thresholdMs: Long? = null) {
+        // 更新统计
+        val arr = callStats.getOrPut(tag) { LongArray(2) }
+        synchronized(arr) {
+            arr[0]++
+            arr[1] += (durationMs * 100).toLong() // 保留2位小数精度
+        }
+        val count = arr[0]
+        val avgMs = arr[1].toDouble() / (count * 100)
+
+        val threshold = thresholdMs ?: warnThresholdMs
+        if (durationMs > threshold) {
+            Log.w(TAG, "⚠️ [$tag] ${"%.2f".format(durationMs)}ms (阈值${threshold}ms) | 第${count}次, 均${"%.2f".format(avgMs)}ms")
+        } else {
+            Log.v(TAG, "[$tag] ${"%.2f".format(durationMs)}ms | 第${count}次, 均${"%.2f".format(avgMs)}ms")
+        }
+
         val tracker = activeTracker
         if (tracker != null) {
             // 委托给活跃 session 的 MethodTracker
@@ -118,5 +146,6 @@ object MethodTracer {
 
     fun reset() {
         synchronized(pendingLock) { pendingRecords.clear() }
+        callStats.clear()
     }
 }

@@ -6,6 +6,7 @@ import io.github.perfettokit.ai.AIProvider
 import io.github.perfettokit.ai.LLMEnhancer
 import io.github.perfettokit.auto.AnomalyDetector
 import io.github.perfettokit.auto.AutoSceneDetector
+import io.github.perfettokit.collector.MethodTracer
 import io.github.perfettokit.history.SessionStore
 import io.github.perfettokit.report.LogcatReporter
 import io.github.perfettokit.report.Reporter
@@ -14,6 +15,7 @@ import io.github.perfettokit.rule.MemoryRule
 import io.github.perfettokit.rule.Rule
 import io.github.perfettokit.rule.ScrollJankRule
 import io.github.perfettokit.rule.SlowFrameRule
+import io.github.perfettokit.rule.GpuRenderingRule
 import io.github.perfettokit.rule.ThreadRule
 import io.github.perfettokit.session.TraceSession
 import io.github.perfettokit.skill.Skill
@@ -213,12 +215,32 @@ object PerfettoKit {
      * // 查看统计
      * PerfettoKit.dumpTrace()
      */
-    inline fun <T> trace(tag: String, block: () -> T): T = MethodTracer.trace(tag, block)
+    inline fun <T> trace(tag: String, thresholdMs: Long? = null, block: () -> T): T = MethodTracer.trace(tag, thresholdMs, block)
 
     /**
-     * 输出所有方法耗时统计到 Logcat。
+     * 获取最近一次 Session 的 GfxInfo 风格统计。
+     * 等价于 `adb shell dumpsys gfxinfo <package>` 的输出，但精确到单个 Scene。
+     *
+     * 用法:
+     * ```kotlin
+     * val session = PerfettoKit.beginSession("scroll")
+     * // ... 操作 ...
+     * session.end()
+     * PerfettoKit.dumpGfxStats()  // 输出百分位统计到 Logcat
+     * ```
      */
-    fun dumpTrace() = MethodTracer.dump()
+    fun dumpGfxStats() {
+        val report = currentSession()?.lastReport() ?: run {
+            android.util.Log.w("PerfettoKit", "No session data available. Call after session.end()")
+            return
+        }
+        val gfxStats = report.gfxFrameStats
+        if (gfxStats.totalFrames == 0) {
+            android.util.Log.w("PerfettoKit", "No frame data (FrameMetrics API 24+ required)")
+            return
+        }
+        io.github.perfettokit.collector.GfxStatsCollector().printToLogcat(gfxStats, report.scene)
+    }
 
     /**
      * 获取已加载的 Skills 列表（调试用）。
@@ -228,6 +250,7 @@ object PerfettoKit {
     private fun defaultRules(): List<Rule> = listOf(
         SlowFrameRule(),
         ScrollJankRule(),
+        GpuRenderingRule(),
         CpuUsageRule(),
         MemoryRule(),
         ThreadRule()

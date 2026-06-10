@@ -3,11 +3,14 @@ package io.github.perfettokit.analyzer
 import io.github.perfettokit.collector.AllocSample
 import io.github.perfettokit.collector.AllocationStats
 import io.github.perfettokit.collector.FrameData
+import io.github.perfettokit.collector.FramePhaseData
 import io.github.perfettokit.collector.IOEvent
 import io.github.perfettokit.collector.IOStats
 import io.github.perfettokit.collector.IOType
 import io.github.perfettokit.collector.MemoryStats
 import io.github.perfettokit.collector.NetworkStats
+import io.github.perfettokit.collector.RenderPipelineAnalysis
+import io.github.perfettokit.collector.RenderPipelineIssue
 import io.github.perfettokit.collector.ThreadStats
 import io.github.perfettokit.skill.Skill
 import io.github.perfettokit.skill.SkillMatcher
@@ -24,11 +27,14 @@ import kotlin.math.abs
 class AnalysisEngine {
 
     private val skillMatcher = SkillMatcher()
+    private val renderPipelineAnalyzer = RenderPipelineAnalyzer()
 
     /**
      * 对一个 Session 的数据进行根因分析。
      *
      * @param skills 已加载的 YAML Skills（为空则只用内置规则）
+     * @param framePhaseData FrameMetrics 各阶段数据 (API 24+)，用于渲染管线分析
+     * @param frameBudgetMs 帧预算 (120Hz=8.33, 90Hz=11.11, 60Hz=16.67)
      */
     fun analyze(
         frames: List<FrameData>,
@@ -43,9 +49,11 @@ class AnalysisEngine {
         threadStats: ThreadStats = ThreadStats(),
         networkStats: NetworkStats = NetworkStats(),
         ioEvents: List<IOEvent> = emptyList(),
-        allocSamples: List<AllocSample> = emptyList()
+        allocSamples: List<AllocSample> = emptyList(),
+        framePhaseData: List<FramePhaseData> = emptyList(),
+        frameBudgetMs: Double = 16.67
     ): AnalysisResult {
-        val slowFrames = frames.filter { it.totalDurationMs > 16.67 }
+        val slowFrames = frames.filter { it.totalDurationMs > frameBudgetMs }
         if (slowFrames.isEmpty()) {
             return AnalysisResult(rootCauses = emptyList(), hotMethods = emptyList())
         }
@@ -85,9 +93,20 @@ class AnalysisEngine {
             ioEvents, allocSamples, stackSamples, appPackagePrefix
         )
 
-        // 合并：Skill 结果优先，内置结果去重后补充
+        // 5. 渲染管线分析（FrameMetrics 阶段数据）
+        val renderCauses = if (framePhaseData.isNotEmpty()) {
+            val pipelineAnalysis = renderPipelineAnalyzer.analyze(framePhaseData, frameBudgetMs)
+            deduceRenderPipelineCauses(pipelineAnalysis, frameBudgetMs)
+        } else {
+            emptyList()
+        }
+
+        // 合并：Skill 结果优先，内置结果去重后补充，渲染管线再补充
         val skillTypes = skillCauses.map { it.type }.toSet()
-        val combinedCauses = skillCauses + builtinCauses.filter { it.type !in skillTypes }
+        val builtinTypes = builtinCauses.map { it.type }.toSet()
+        val combinedCauses = skillCauses +
+            builtinCauses.filter { it.type !in skillTypes } +
+            renderCauses.filter { it.type !in skillTypes && it.type !in builtinTypes }
 
         return AnalysisResult(
             rootCauses = combinedCauses.sortedByDescending { it.confidence.ordinal },
@@ -357,6 +376,110 @@ class AnalysisEngine {
     }
 
     /**
+     * 基于渲染管线分析结果生成 RootCause。
+     * 这是诊断 Texture Upload / GPU Command Saturation / Draw Call Explosion 的核心。
+     *
+     * 映射关系 (Systrace → FrameMetrics → RootCause):
+     *   - TextureOp (Systrace) → SYNC phase 高 → TEXTURE_UPLOAD_CHURN
+     *   - FillRectOp + RoundRectOp (Systrace) → COMMAND phase 高 → GPU_COMMAND_SATURATION
+     *   - RenderThread Self 时间长 → GPU phase 高 → GPU_BOUND
+     *   - 大量 Canvas.draw*() → DRAW + COMMAND 双高 → DRAW_CALL_EXPLOSION
+     */
+    private fun deduceRenderPipelineCauses(
+        analysis: RenderPipelineAnalysis,
+        frameBudgetMs: Double
+    ): List<RootCause> {
+        val causes = mutableListOf<RootCause>()
+
+        if (analysis.hasTextureUploadIssue) {
+            val confidence = if (analysis.consecutiveSyncSpikeCount >= 5)
+                RootCause.Confidence.HIGH else RootCause.Confidence.MEDIUM
+            causes.add(RootCause(
+                type = RootCauseType.TEXTURE_UPLOAD_CHURN,
+                confidence = confidence,
+                description = "纹理频繁上传: ${analysis.textureUploadFrames} 帧 SYNC 超标 " +
+                        "(avg %.1fms, max %.1fms, 帧预算 %.1fms)".format(
+                            analysis.avgSyncInJankMs, analysis.maxSyncMs, frameBudgetMs),
+                evidence = "连续 ${analysis.consecutiveSyncSpikeCount} 帧 SYNC > ${(frameBudgetMs * 0.3).toInt()}ms，" +
+                        "指示每帧都有新 Bitmap 触发 GPU 纹理创建 (glGenTextures + glTexImage2D)",
+                suggestion = "1. 使用固定 Bitmap 复用 (ThumbnailCanvasView 方案) 避免重复纹理创建\n" +
+                        "2. Glide 开启内存缓存 skipMemoryCache(false)，命中时跳过 texture upload\n" +
+                        "3. 对静态缩略图调用 Bitmap.prepareToDraw() 预上传纹理\n" +
+                        "4. 限制每帧更新的 ImageView 数量 (节流)"
+            ))
+        }
+
+        if (analysis.hasGpuCommandIssue) {
+            val confidence = if (analysis.consecutiveCommandSpikeCount >= 5)
+                RootCause.Confidence.HIGH else RootCause.Confidence.MEDIUM
+            causes.add(RootCause(
+                type = RootCauseType.GPU_COMMAND_SATURATION,
+                confidence = confidence,
+                description = "GPU 命令饱和: ${analysis.gpuCommandFrames} 帧 COMMAND 超标 " +
+                        "(avg %.1fms, max %.1fms)".format(
+                            analysis.avgCommandInJankMs, analysis.maxCommandMs),
+                evidence = "连续 ${analysis.consecutiveCommandSpikeCount} 帧 COMMAND > ${(frameBudgetMs * 0.5).toInt()}ms，" +
+                        "指示单帧产生了过多 GPU 绘制指令 (TextureOp/FillRectOp/RoundRectOp/ShadowOp)",
+                suggestion = "1. 自定义 View 使用离屏 Bitmap 缓存 (静态部分只绘制一次)\n" +
+                        "2. 相邻小元素合并绘制 (多个 drawRect → 一次 drawPath)\n" +
+                        "3. 减少 View 层级中的阴影 (elevation) 数量\n" +
+                        "4. 滚动时跳过非必要的装饰绘制"
+            ))
+        }
+
+        if (analysis.hasGpuBoundIssue) {
+            causes.add(RootCause(
+                type = RootCauseType.GPU_BOUND,
+                confidence = RootCause.Confidence.MEDIUM,
+                description = "GPU 执行瓶颈: ${analysis.gpuBoundFrames} 帧 GPU 完成等待超标 " +
+                        "(avg %.1fms, max %.1fms)".format(
+                            analysis.avgGpuInJankMs, analysis.maxGpuMs),
+                evidence = "GPU fence 等待时间过长，GPU 过载无法在帧预算内完成渲染",
+                suggestion = "1. 降低 overdraw (使用 Layout Inspector 检查)\n" +
+                        "2. 减少透明叠加层 (alpha blend 对 GPU 开销大)\n" +
+                        "3. 缩略图使用合适分辨率 (不要全尺寸上传到 GPU)\n" +
+                        "4. 关闭不可见 View 的硬件加速"
+            ))
+        }
+
+        // Draw Call 爆炸（DRAW + COMMAND 双高但非纯 SYNC 问题）
+        if (analysis.heavyDrawFrames > 3 && analysis.gpuCommandFrames > 3 &&
+            !analysis.hasTextureUploadIssue) {
+            causes.add(RootCause(
+                type = RootCauseType.DRAW_CALL_EXPLOSION,
+                confidence = RootCause.Confidence.HIGH,
+                description = "Draw Call 爆炸: 自定义 View 产生过多绘制命令 " +
+                        "(DRAW avg %.1fms, COMMAND avg %.1fms)".format(
+                            analysis.avgDrawInJankMs, analysis.avgCommandInJankMs),
+                evidence = "${analysis.heavyDrawFrames} 帧 DRAW 超标 + " +
+                        "${analysis.gpuCommandFrames} 帧 COMMAND 超标，" +
+                        "Canvas 录制的绘制命令在 GPU 执行时产生大量 Op",
+                suggestion = "1. 将自定义 View 的静态部分缓存为离屏 Bitmap (只在数据变化时重绘)\n" +
+                        "2. 缩放比例小时合并相邻元素 (宽度 < 2px 的元素无需独立绘制)\n" +
+                        "3. 使用 Canvas.clipRect() 精确裁剪，跳过不可见区域\n" +
+                        "4. 考虑将复杂绘制拆分为多个硬件加速 Layer"
+            ))
+        }
+
+        // RenderThread 复合过载
+        if (analysis.renderThreadBoundPercent > 60 && causes.size >= 2) {
+            causes.add(RootCause(
+                type = RootCauseType.RENDER_THREAD_OVERLOAD,
+                confidence = RootCause.Confidence.HIGH,
+                description = "RenderThread 复合过载: %.0f%% 的掉帧由 RenderThread 主导".format(
+                    analysis.renderThreadBoundPercent),
+                evidence = "SYNC + COMMAND + GPU 三阶段叠加，RenderThread 全面饱和",
+                suggestion = "需要同时解决:\n" +
+                        "• Texture Upload → Bitmap 复用 + prepareToDraw()\n" +
+                        "• GPU Commands → 离屏缓存 + 元素合并\n" +
+                        "• GPU Load → 降低 overdraw + 合理分辨率"
+            ))
+        }
+
+        return causes
+    }
+
+    /**
      * 从原始 IOEvent 中提取完整业务调用链。
      * 按 IO 类型分组，每组取最有代表性的调用链。
      */
@@ -532,14 +655,19 @@ data class RootCause(
 }
 
 enum class RootCauseType {
-    GC_PRESSURE,       // GC 压力
-    MAIN_THREAD_IO,    // 主线程 IO
-    HEAVY_LAYOUT,      // 布局复杂
-    HEAVY_DRAW,        // 绘制耗时
-    SLOW_METHOD,       // 具体慢方法
-    LOCK_CONTENTION,   // 锁竞争
-    BINDER_CALL,       // Binder 调用
-    THREAD_EXPLOSION,  // 线程暴增
-    HIGH_ALLOCATION,   // 高频分配
-    UNKNOWN            // 未知
+    GC_PRESSURE,           // GC 压力
+    MAIN_THREAD_IO,        // 主线程 IO
+    HEAVY_LAYOUT,          // 布局复杂
+    HEAVY_DRAW,            // 绘制耗时
+    SLOW_METHOD,           // 具体慢方法
+    LOCK_CONTENTION,       // 锁竞争
+    BINDER_CALL,           // Binder 调用
+    THREAD_EXPLOSION,      // 线程暴增
+    HIGH_ALLOCATION,       // 高频分配
+    TEXTURE_UPLOAD_CHURN,  // 纹理频繁上传 (SYNC 阶段反复 spike)
+    GPU_COMMAND_SATURATION,// GPU 命令饱和 (TextureOp/FillRectOp 过多)
+    GPU_BOUND,             // GPU 执行瓶颈 (GPU fence 等待过长)
+    DRAW_CALL_EXPLOSION,   // Draw Call 爆炸 (Canvas 操作过多导致 DRAW+COMMAND 双高)
+    RENDER_THREAD_OVERLOAD,// RenderThread 复合过载
+    UNKNOWN                // 未知
 }
