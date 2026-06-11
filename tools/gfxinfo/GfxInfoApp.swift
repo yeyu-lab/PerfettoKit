@@ -113,6 +113,23 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                 Button("📱 前台应用") { viewModel.detectForegroundApp() }
                     .buttonStyle(.bordered)
+
+                Button("📈 曲线图") { viewModel.openChart() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.teal)
+
+                Button(viewModel.autoCollecting ? "⏹ 停止采集" : "🔄 自动采集") {
+                    viewModel.toggleAutoCollect()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(viewModel.autoCollecting ? .red : .gray)
+
+                if viewModel.chartCount > 0 {
+                    Text("图表: \(viewModel.chartCount)次")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
                 Spacer()
             }
             .padding(12)
@@ -212,6 +229,13 @@ class GfxInfoViewModel: ObservableObject {
     @Published var deviceInfo = ""
     @Published var deviceConnected = false
     @Published var isLoading = false
+    @Published var autoCollecting = false
+    @Published var chartCount = 0
+
+    private var chartHistory: [[String: Any]] = []
+    private var autoTimer: Timer?
+    private let autoInterval: TimeInterval = 3
+    private var httpServer: ChartHTTPServer?
 
     private var adbPath: String {
         // 查找 adb
@@ -224,6 +248,40 @@ class GfxInfoViewModel: ObservableObject {
             if FileManager.default.fileExists(atPath: p) { return p }
         }
         return "adb" // fallback to PATH
+    }
+
+    private static let dataDir: URL = {
+        let url = URL(fileURLWithPath: #file).deletingLastPathComponent()
+        // If running from build dir, use source dir
+        if url.lastPathComponent == "MacOS" {
+            // find tools/gfxinfo relative to executable
+            let bundlePath = Bundle.main.bundlePath
+            let toolsDir = URL(fileURLWithPath: bundlePath).deletingLastPathComponent().deletingLastPathComponent()
+            if FileManager.default.fileExists(atPath: toolsDir.appendingPathComponent("gfxinfo_chart.html").path) {
+                return toolsDir
+            }
+        }
+        return url
+    }()
+
+    private var chartDataFile: URL {
+        // Store in same dir as the script/executable's parent
+        let dir = URL(fileURLWithPath: Bundle.main.bundlePath).deletingLastPathComponent()
+        return dir.appendingPathComponent("gfxinfo_history.json")
+    }
+
+    private var chartHTMLFile: URL {
+        let dir = URL(fileURLWithPath: Bundle.main.bundlePath).deletingLastPathComponent()
+        return dir.appendingPathComponent("gfxinfo_chart.html")
+    }
+
+    init() {
+        loadChartHistory()
+        startHTTPServer()
+        // 确保 JSON 文件存在（浏览器需要）
+        if !FileManager.default.fileExists(atPath: chartDataFile.path) {
+            try? "{\"sessions\":[]}".write(to: chartDataFile, atomically: true, encoding: .utf8)
+        }
     }
 
     func detectDevice() {
@@ -268,6 +326,8 @@ class GfxInfoViewModel: ObservableObject {
                 self?.appendOutput(String(repeating: "═", count: 60) + "\n\n")
                 self?.statusText = "抓取完成"
                 self?.isLoading = false
+                // 加入图表
+                self?.addToChart(raw: raw)
             }
         }
     }
@@ -288,6 +348,8 @@ class GfxInfoViewModel: ObservableObject {
                 self?.appendOutput(parsed)
                 self?.statusText = "Framestats 分析完成"
                 self?.isLoading = false
+                // 加入图表
+                self?.addToChart(raw: raw)
             }
         }
     }
@@ -534,5 +596,395 @@ class GfxInfoViewModel: ObservableObject {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
         return f.string(from: Date())
+    }
+
+    // MARK: - Chart
+
+    func openChart() {
+        generateChartHTML()
+        let url = URL(string: "http://127.0.0.1:8765/gfxinfo_chart.html")!
+        NSWorkspace.shared.open(url)
+        statusText = "图表已打开"
+    }
+
+    func toggleAutoCollect() {
+        if autoCollecting {
+            autoCollecting = false
+            autoTimer?.invalidate()
+            autoTimer = nil
+            statusText = "自动采集已停止"
+        } else {
+            autoCollecting = true
+            statusText = "自动采集中... (每\(Int(autoInterval))秒)"
+            appendOutput("🔄 自动采集已开启 (每\(Int(autoInterval))秒)\n")
+            // 先 reset
+            runAsync(["shell", "dumpsys", "gfxinfo", packageName, "reset"]) { _ in }
+            let timer = Timer(timeInterval: autoInterval, repeats: true) { [weak self] _ in
+                self?.autoCollectOnce()
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            autoTimer = timer
+        }
+    }
+
+    private func autoCollectOnce() {
+        guard autoCollecting else { return }
+        runAsync(["shell", "dumpsys", "gfxinfo", packageName]) { [weak self] raw in
+            DispatchQueue.main.async {
+                // 判断 adb 是否失败
+                if raw.contains("ERROR") || raw.contains("no devices") || raw.isEmpty {
+                    // 设备断开，静默跳过不刷屏
+                    self?.statusText = "自动采集中... 等待设备连接"
+                    return
+                }
+                let before = self?.chartCount ?? 0
+                self?.addToChart(raw: raw)
+                let after = self?.chartCount ?? 0
+                if after > before {
+                    let sessions = self?.chartHistory ?? []
+                    if let last = sessions.last,
+                       let fps = last["avgFps"] as? Double,
+                       let jankPct = last["jankPercent"] as? Double,
+                       let count = last["frameCount"] as? Int {
+                        let icon = jankPct > 20 ? "🔴" : jankPct > 10 ? "🟡" : "🟢"
+                        self?.appendOutput("\(icon) #\(after) [\(self?.timeStr ?? "")] \(fps)fps | \(count)帧 | 掉帧\(jankPct)%\n")
+                    }
+                }
+                // Total frames = 0 时静默跳过（刚 reset 后正常现象）
+                self?.runAsync(["shell", "dumpsys", "gfxinfo", self?.packageName ?? "", "reset"]) { _ in }
+                self?.statusText = "自动采集中... #\(self?.chartCount ?? 0) (每\(Int(self?.autoInterval ?? 3))秒)"
+            }
+        }
+    }
+
+    private func addToChart(raw: String) {
+        // 尝试从 framestats 原始数据提取
+        let frameTimes = extractFrameTimes(from: raw)
+
+        if !frameTimes.isEmpty {
+            // 有原始帧数据，精确计算
+            let total = frameTimes.count
+            let budgetMs = 8.33
+            let jank = frameTimes.filter { $0 > budgetMs }.count
+            let sum = frameTimes.reduce(0, +)
+            let avgFps = sum > 0 ? 1000.0 / (sum / Double(total)) : 0
+            let sorted = frameTimes.sorted()
+
+            let entry: [String: Any] = [
+                "timestamp": timeStr,
+                "frameTimes": frameTimes,
+                "frameCount": total,
+                "jankCount": jank,
+                "jankPercent": round(Double(jank) * 1000 / Double(total)) / 10,
+                "avgFps": round(avgFps * 10) / 10,
+                "avgFrameTime": round(sum / Double(total) * 100) / 100,
+                "p50": sorted[total / 2],
+                "p90": sorted[Int(Double(total) * 0.9)],
+                "p99": sorted[min(Int(Double(total) * 0.99), total - 1)],
+                "maxFrameTime": sorted.last ?? 0
+            ]
+            chartHistory.append(entry)
+            chartCount = chartHistory.count
+            saveChartHistory()
+        } else {
+            // 无原始帧数据，从摘要统计中提取
+            addToChartFromSummary(raw: raw)
+        }
+    }
+
+    private func addToChartFromSummary(raw: String) {
+        var totalFrames = 0
+        var jankyFrames = 0
+        var jankyPercent = 0.0
+        var p50 = 0.0
+        var p90 = 0.0
+        var p95 = 0.0
+        var p99 = 0.0
+
+        for line in raw.split(separator: "\n") {
+            let l = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if l.contains("Total frames rendered:") {
+                if let m = l.range(of: #"(\d+)"#, options: .regularExpression) {
+                    totalFrames = Int(l[m]) ?? 0
+                }
+            } else if l.contains("Janky frames:") && !l.contains("legacy") {
+                if let m = l.range(of: #"(\d+)\s*\("#, options: .regularExpression) {
+                    let numStr = l[m].trimmingCharacters(in: CharacterSet(charactersIn: " ("))
+                    jankyFrames = Int(numStr) ?? 0
+                }
+                if let m = l.range(of: #"\(([\d.]+)%\)"#, options: .regularExpression) {
+                    let pctStr = l[m].trimmingCharacters(in: CharacterSet(charactersIn: "(%)"))
+                    jankyPercent = Double(pctStr) ?? 0
+                }
+            } else if l.contains("50th percentile:") {
+                if let m = l.range(of: #"(\d+)ms"#, options: .regularExpression) {
+                    p50 = Double(l[m].replacingOccurrences(of: "ms", with: "")) ?? 0
+                }
+            } else if l.contains("90th percentile:") {
+                if let m = l.range(of: #"(\d+)ms"#, options: .regularExpression) {
+                    p90 = Double(l[m].replacingOccurrences(of: "ms", with: "")) ?? 0
+                }
+            } else if l.contains("95th percentile:") {
+                if let m = l.range(of: #"(\d+)ms"#, options: .regularExpression) {
+                    p95 = Double(l[m].replacingOccurrences(of: "ms", with: "")) ?? 0
+                }
+            } else if l.contains("99th percentile:") {
+                if let m = l.range(of: #"(\d+)ms"#, options: .regularExpression) {
+                    p99 = Double(l[m].replacingOccurrences(of: "ms", with: "")) ?? 0
+                }
+            }
+        }
+
+        guard totalFrames > 0 else { return }
+
+        // 从百分位估算 FPS（用 p50 作为典型帧耗时）
+        let avgFrameTime = p50 > 0 ? p50 : 8.33
+        let avgFps = min(120, 1000.0 / avgFrameTime)
+
+        let entry: [String: Any] = [
+            "timestamp": timeStr,
+            "frameTimes": [] as [Double],  // 无逐帧数据
+            "frameCount": totalFrames,
+            "jankCount": jankyFrames,
+            "jankPercent": jankyPercent,
+            "avgFps": round(avgFps * 10) / 10,
+            "avgFrameTime": avgFrameTime,
+            "p50": p50,
+            "p90": p90,
+            "p99": p99,
+            "maxFrameTime": p99  // 用 p99 近似
+        ]
+
+        chartHistory.append(entry)
+        chartCount = chartHistory.count
+        saveChartHistory()
+    }
+
+    private func extractFrameTimes(from raw: String) -> [Double] {
+        var frameTimes: [Double] = []
+        // 动态解析列头位置
+        var iIntendedVsync = 1
+        var iFrameCompleted = 13
+        var minCols = 14
+
+        let lines = raw.split(separator: "\n", omittingEmptySubsequences: false)
+        for line in lines {
+            let l = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if l.hasPrefix("Flags,") {
+                let headers = l.split(separator: ",")
+                for (i, h) in headers.enumerated() {
+                    let name = h.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if name == "IntendedVsync" { iIntendedVsync = i }
+                    else if name == "FrameCompleted" { iFrameCompleted = i }
+                }
+                minCols = max(iIntendedVsync, iFrameCompleted) + 1
+                break
+            }
+        }
+
+        for line in lines {
+            let l = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let first = l.first, first.isNumber else { continue }
+            let parts = l.split(separator: ",")
+            guard parts.count >= minCols else { continue }
+            guard let intendedVsync = Int64(parts[iIntendedVsync].trimmingCharacters(in: .whitespacesAndNewlines)),
+                  let frameCompleted = Int64(parts[iFrameCompleted].trimmingCharacters(in: .whitespacesAndNewlines)),
+                  intendedVsync > 0, frameCompleted > intendedVsync else { continue }
+            let totalMs = Double(frameCompleted - intendedVsync) / 1_000_000.0
+            if totalMs > 0 && totalMs < 500 {
+                frameTimes.append(round(totalMs * 100) / 100)
+            }
+        }
+        return frameTimes
+    }
+
+    private func loadChartHistory() {
+        guard let data = try? Data(contentsOf: chartDataFile),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sessions = json["sessions"] as? [[String: Any]] else {
+            chartHistory = []
+            chartCount = 0
+            return
+        }
+        chartHistory = sessions
+        chartCount = sessions.count
+    }
+
+    private func saveChartHistory() {
+        let json: [String: Any] = ["sessions": chartHistory]
+        guard let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) else { return }
+        try? data.write(to: chartDataFile)
+    }
+
+    private func startHTTPServer() {
+        generateChartHTML()
+        httpServer = ChartHTTPServer(port: 8765, directory: chartDataFile.deletingLastPathComponent())
+        httpServer?.start()
+    }
+
+    private func generateChartHTML() {
+        let html = """
+        <!DOCTYPE html>
+        <html lang="zh-CN">
+        <head>
+        <meta charset="UTF-8">
+        <title>PerfettoKit GfxInfo Chart</title>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+        <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, 'SF Pro', sans-serif; background: #1a1a2e; color: #eee; padding: 20px; }
+        h1 { font-size: 20px; margin-bottom: 15px; color: #64ffda; }
+        .top-bar { display: flex; align-items: center; gap: 15px; margin-bottom: 20px; }
+        .top-bar button { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
+        .btn-refresh { background: #64ffda; color: #1a1a2e; font-weight: 600; }
+        .btn-clear { background: #ff5252; color: #fff; }
+        .status { color: #888; font-size: 12px; }
+        .charts { display: grid; grid-template-columns: 1fr; gap: 20px; }
+        .chart-card { background: #16213e; border-radius: 12px; padding: 20px; }
+        .chart-card h3 { font-size: 14px; color: #aaa; margin-bottom: 10px; }
+        .chart-container { position: relative; height: 250px; }
+        .session-list { margin-top: 20px; }
+        .session-list h3 { font-size: 14px; color: #aaa; margin-bottom: 10px; }
+        .session-item { display: inline-block; padding: 6px 12px; margin: 3px; border-radius: 6px;
+          background: #0f3460; cursor: pointer; font-size: 12px; transition: all 0.2s; }
+        .session-item:hover { background: #1a5276; transform: scale(1.05); }
+        .session-item.active { background: #64ffda; color: #1a1a2e; font-weight: 600; }
+        .detail-panel { margin-top: 20px; background: #16213e; border-radius: 12px; padding: 20px; display: none; }
+        .detail-panel.show { display: block; }
+        .detail-panel h3 { color: #64ffda; margin-bottom: 10px; }
+        .detail-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 15px; }
+        .stat-box { background: #0f3460; padding: 10px; border-radius: 8px; text-align: center; }
+        .stat-box .value { font-size: 20px; font-weight: 700; color: #64ffda; }
+        .stat-box .label { font-size: 11px; color: #888; margin-top: 3px; }
+        .detail-chart { height: 200px; }
+        </style>
+        </head>
+        <body>
+        <div class="top-bar">
+          <h1>PerfettoKit GfxInfo Chart</h1>
+          <button class="btn-refresh" onclick="refresh()">刷新</button>
+          <button class="btn-clear" onclick="clearData()">清空历史</button>
+          <span class="status" id="status">加载中...</span>
+        </div>
+        <div class="charts">
+          <div class="chart-card"><h3>帧率趋势 (FPS)</h3><div class="chart-container"><canvas id="fpsChart"></canvas></div></div>
+          <div class="chart-card"><h3>掉帧率趋势 (%)</h3><div class="chart-container"><canvas id="jankChart"></canvas></div></div>
+        </div>
+        <div class="session-list"><h3>采集记录 (点击查看详情)</h3><div id="sessionItems"></div></div>
+        <div class="detail-panel" id="detailPanel">
+          <h3 id="detailTitle">第 N 次采集</h3>
+          <div class="detail-stats" id="detailStats"></div>
+          <div class="chart-container detail-chart"><canvas id="detailChart"></canvas></div>
+        </div>
+        <script>
+        let history={sessions:[]},fpsChart,jankChart,detailChart,lastCount=0;
+        async function loadData(){try{const r=await fetch('/gfxinfo_history.json?'+Date.now());const d=await r.json();if(d.sessions.length===lastCount)return;history=d;lastCount=history.sessions.length;renderCharts();renderSessions();document.getElementById('status').textContent=history.sessions.length+' 次采集'}catch(e){document.getElementById('status').textContent='加载失败'}}
+        function renderCharts(){const labels=history.sessions.map((s,i)=>'#'+(i+1)+' '+s.timestamp);const fpsData=history.sessions.map(s=>s.avgFps);const jankData=history.sessions.map(s=>s.jankPercent);const opts={responsive:true,maintainAspectRatio:false,animation:false,interaction:{mode:'index',intersect:false},plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#888',maxRotation:45,font:{size:10}},grid:{color:'#333'}},y:{ticks:{color:'#888'},grid:{color:'#333'}}},onClick:(evt,el)=>{if(el.length>0)showDetail(el[0].index)}};if(fpsChart)fpsChart.destroy();fpsChart=new Chart(document.getElementById('fpsChart'),{type:'line',data:{labels,datasets:[{data:fpsData,borderColor:'#64ffda',backgroundColor:'rgba(100,255,218,0.1)',fill:true,tension:0.3,pointRadius:4,pointHoverRadius:7}]},options:{...opts,scales:{...opts.scales,y:{...opts.scales.y,suggestedMin:0,suggestedMax:120}}}});if(jankChart)jankChart.destroy();jankChart=new Chart(document.getElementById('jankChart'),{type:'line',data:{labels,datasets:[{data:jankData,borderColor:'#ff5252',backgroundColor:'rgba(255,82,82,0.1)',fill:true,tension:0.3,pointRadius:4,pointHoverRadius:7}]},options:{...opts,scales:{...opts.scales,y:{...opts.scales.y,suggestedMin:0}}}})}
+        function renderSessions(){const c=document.getElementById('sessionItems');c.innerHTML=history.sessions.map((s,i)=>{const color=s.jankPercent>20?'#ff5252':s.jankPercent>10?'#ffd740':'#64ffda';return '<span class="session-item" onclick="showDetail('+i+')" style="border-left:3px solid '+color+'">#'+(i+1)+' '+s.timestamp+' | '+s.avgFps+'fps | '+s.jankPercent+'%卡</span>'}).join('')}
+        function showDetail(i){const s=history.sessions[i];if(!s)return;document.querySelectorAll('.session-item').forEach((el,j)=>el.classList.toggle('active',j===i));const p=document.getElementById('detailPanel');p.classList.add('show');document.getElementById('detailTitle').textContent='第 '+(i+1)+' 次采集 — '+s.timestamp;document.getElementById('detailStats').innerHTML='<div class="stat-box"><div class="value">'+s.avgFps+'</div><div class="label">平均FPS</div></div><div class="stat-box"><div class="value">'+s.frameCount+'</div><div class="label">总帧数</div></div><div class="stat-box"><div class="value">'+s.jankCount+'</div><div class="label">掉帧数</div></div><div class="stat-box"><div class="value">'+s.jankPercent+'%</div><div class="label">掉帧率</div></div><div class="stat-box"><div class="value">'+s.avgFrameTime+'ms</div><div class="label">平均帧耗时</div></div><div class="stat-box"><div class="value">'+s.p90+'ms</div><div class="label">P90</div></div><div class="stat-box"><div class="value">'+s.p99+'ms</div><div class="label">P99</div></div><div class="stat-box"><div class="value">'+s.maxFrameTime+'ms</div><div class="label">最大帧耗时</div></div>';if(detailChart)detailChart.destroy();const ft=s.frameTimes||[];detailChart=new Chart(document.getElementById('detailChart'),{type:'bar',data:{labels:ft.map((_,j)=>j+1),datasets:[{data:ft,backgroundColor:ft.map(t=>t>16.67?'#ff5252':t>8.33?'#ffd740':'#64ffda'),borderWidth:0}]},options:{responsive:true,maintainAspectRatio:false,animation:false,plugins:{legend:{display:false}},scales:{x:{display:false},y:{ticks:{color:'#888'},grid:{color:'#333'}}}}});p.scrollIntoView({behavior:'smooth'})}
+        function refresh(){lastCount=0;loadData()}
+        function clearData(){if(confirm('确定清空？')){fetch('/gfxinfo_history.json',{method:'PUT',body:JSON.stringify({sessions:[]})});history={sessions:[]};lastCount=0;renderCharts();renderSessions();document.getElementById('detailPanel').classList.remove('show')}}
+        loadData();setInterval(loadData,2000);
+        </script>
+        </body>
+        </html>
+        """
+        try? html.write(to: chartHTMLFile, atomically: true, encoding: .utf8)
+    }
+}
+
+// MARK: - Simple HTTP Server for Chart
+
+import Network
+
+class ChartHTTPServer {
+    private var listener: NWListener?
+    private let port: UInt16
+    private let directory: URL
+
+    init(port: UInt16, directory: URL) {
+        self.port = port
+        self.directory = directory
+    }
+
+    func start() {
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else { return }
+        do {
+            listener = try NWListener(using: .tcp, on: nwPort)
+        } catch {
+            return
+        }
+
+        listener?.newConnectionHandler = { [weak self] connection in
+            self?.handleConnection(connection)
+        }
+        listener?.start(queue: DispatchQueue.global(qos: .utility))
+    }
+
+    private func handleConnection(_ connection: NWConnection) {
+        connection.start(queue: DispatchQueue.global(qos: .utility))
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, _, _ in
+            guard let self = self, let data = data, let request = String(data: data, encoding: .utf8) else {
+                connection.cancel()
+                return
+            }
+            self.processRequest(request, connection: connection)
+        }
+    }
+
+    private func processRequest(_ request: String, connection: NWConnection) {
+        let lines = request.split(separator: "\r\n")
+        guard let firstLine = lines.first else { connection.cancel(); return }
+        let parts = firstLine.split(separator: " ")
+        guard parts.count >= 2 else { connection.cancel(); return }
+
+        let method = String(parts[0])
+        var path = String(parts[1])
+
+        // Strip query params
+        if let qIdx = path.firstIndex(of: "?") {
+            path = String(path[..<qIdx])
+        }
+
+        if method == "PUT" && path == "/gfxinfo_history.json" {
+            // Handle PUT for clearing data
+            if let bodyRange = request.range(of: "\r\n\r\n") {
+                let body = String(request[bodyRange.upperBound...])
+                let fileURL = directory.appendingPathComponent("gfxinfo_history.json")
+                try? body.write(to: fileURL, atomically: true, encoding: .utf8)
+            }
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+            connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
+                connection.cancel()
+            })
+            return
+        }
+
+        // GET
+        if path == "/" { path = "/gfxinfo_chart.html" }
+        let fileName = String(path.dropFirst()) // remove leading /
+        let fileURL = directory.appendingPathComponent(fileName)
+
+        guard FileManager.default.fileExists(atPath: fileURL.path),
+              let fileData = try? Data(contentsOf: fileURL) else {
+            let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
+            connection.send(content: response.data(using: .utf8), completion: .contentProcessed { _ in
+                connection.cancel()
+            })
+            return
+        }
+
+        let contentType: String
+        if fileName.hasSuffix(".html") { contentType = "text/html; charset=utf-8" }
+        else if fileName.hasSuffix(".json") { contentType = "application/json" }
+        else { contentType = "application/octet-stream" }
+
+        let header = "HTTP/1.1 200 OK\r\nContent-Type: \(contentType)\r\nContent-Length: \(fileData.count)\r\nAccess-Control-Allow-Origin: *\r\n\r\n"
+        var responseData = header.data(using: .utf8)!
+        responseData.append(fileData)
+
+        connection.send(content: responseData, completion: .contentProcessed { _ in
+            connection.cancel()
+        })
     }
 }
