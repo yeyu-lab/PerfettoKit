@@ -330,6 +330,10 @@ data class SlowMessage(
  */
 private fun isAppFrame(frame: StackTraceElement): Boolean {
     val cls = frame.className
+    // 排除 SDK 自身（但保留 sample app）
+    if (cls.startsWith("io.github.perfettokit.") && !cls.startsWith("io.github.perfettokit.sample")) {
+        return false
+    }
     return !cls.startsWith("android.") &&
         !cls.startsWith("com.android.") &&
         !cls.startsWith("java.") &&
@@ -341,7 +345,6 @@ private fun isAppFrame(frame: StackTraceElement): Boolean {
         !cls.startsWith("sun.") &&
         !cls.startsWith("androidx.") &&
         !cls.startsWith("com.google.") &&
-        !cls.startsWith("io.github.perfettokit.") &&
         !cls.startsWith("com.amplitude.")
 }
 
