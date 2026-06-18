@@ -13,7 +13,8 @@ class SampleApp : Application() {
         // 初始化 PerfettoKit
         // Skills 从 assets/perfettokit/skills/ 自动加载
 
-        val ollamaBase = "http://10.10.8.197:11434/v1"         // 真机：换成你 Mac 的 IP
+        // 默认使用模拟器回环地址，真机调试时请自行替换为局域网地址。
+        val ollamaBase = "http://10.0.2.2:11434/v1"
 
 
         PerfettoKit.init(this, PerfettoKit.Config(
