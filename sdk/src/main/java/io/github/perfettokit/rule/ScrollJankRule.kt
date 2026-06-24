@@ -1,5 +1,6 @@
 package io.github.perfettokit.rule
 
+import io.github.perfettokit.i18n.I18n
 import io.github.perfettokit.report.DiagnosisReport
 
 /**
@@ -26,12 +27,14 @@ class ScrollJankRule(
                 DiagnosisReport.Issue(
                     severity = DiagnosisReport.Severity.HIGH,
                     rule = name,
-                    message = "滑动过程中检测到 $consecutiveJanks 次连续掉帧 " +
-                            "(连续 >=${consecutiveJankThreshold} 帧超时)，用户可明显感知卡顿",
-                    suggestion = "建议:\n" +
-                            "1. RecyclerView: 检查 onBindViewHolder 耗时，避免同步加载图片\n" +
-                            "2. 自定义 View: 减少 onDraw 中复杂计算，使用 Canvas 缓存\n" +
-                            "3. 检查是否有滑动时触发的网络/数据库操作"
+                    message = I18n.tr(
+                        "滑动过程中检测到 $consecutiveJanks 次连续掉帧 (连续 >=${consecutiveJankThreshold} 帧超时)，用户可明显感知卡顿",
+                        "Detected $consecutiveJanks consecutive jank events while scrolling (>=${consecutiveJankThreshold} timed-out frames in a row), users can clearly perceive stutter"
+                    ),
+                    suggestion = I18n.tr(
+                        "建议:\n1. RecyclerView: 检查 onBindViewHolder 耗时，避免同步加载图片\n2. 自定义 View: 减少 onDraw 中复杂计算，使用 Canvas 缓存\n3. 检查是否有滑动时触发的网络/数据库操作",
+                        "Suggestions:\n1. RecyclerView: profile onBindViewHolder and avoid sync image loading.\n2. Custom View: reduce heavy work in onDraw and use Canvas caching.\n3. Check whether scrolling triggers network/database operations."
+                    )
                 )
             )
         }
@@ -43,11 +46,14 @@ class ScrollJankRule(
                 DiagnosisReport.Issue(
                     severity = DiagnosisReport.Severity.MEDIUM,
                     rule = name,
-                    message = "滑动平均帧率 %.1ffps，低于目标 ${targetFps}fps 的 80%%".format(avgFps),
-                    suggestion = "建议:\n" +
-                            "1. 使用 RecyclerView.setHasFixedSize(true)\n" +
-                            "2. 预加载/缓存列表项: recyclerView.setItemViewCacheSize()\n" +
-                            "3. 复杂布局考虑异步 inflate"
+                    message = I18n.tr(
+                        "滑动平均帧率 %.1ffps，低于目标 ${targetFps}fps 的 80%%".format(avgFps),
+                        "Average scrolling FPS is %.1f, below 80%% of target ${targetFps}fps".format(avgFps)
+                    ),
+                    suggestion = I18n.tr(
+                        "建议:\n1. 使用 RecyclerView.setHasFixedSize(true)\n2. 预加载/缓存列表项: recyclerView.setItemViewCacheSize()\n3. 复杂布局考虑异步 inflate",
+                        "Suggestions:\n1. Use RecyclerView.setHasFixedSize(true).\n2. Preload/cache list items: recyclerView.setItemViewCacheSize().\n3. Consider async inflate for complex layouts."
+                    )
                 )
             )
         }

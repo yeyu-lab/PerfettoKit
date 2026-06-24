@@ -1,5 +1,6 @@
 package io.github.perfettokit.rule
 
+import io.github.perfettokit.i18n.I18n
 import io.github.perfettokit.report.DiagnosisReport
 
 /**
@@ -34,12 +35,14 @@ class SlowFrameRule(
                 DiagnosisReport.Issue(
                     severity = DiagnosisReport.Severity.HIGH,
                     rule = name,
-                    message = "检测到 ${severeFrames.size} 帧严重卡顿 (>${"%.1f".format(severeThreshold)}ms)，" +
-                            "最慢帧: ${"%.1f".format(maxMs)}ms$refreshInfo",
-                    suggestion = "建议:\n" +
-                            "1. 检查主线程是否有耗时操作 (IO/计算)\n" +
-                            "2. 使用 Choreographer 回调验证帧率\n" +
-                            "3. 检查是否有频繁 GC (对象分配过多)"
+                    message = I18n.tr(
+                        "检测到 ${severeFrames.size} 帧严重卡顿 (>${"%.1f".format(severeThreshold)}ms)，最慢帧: ${"%.1f".format(maxMs)}ms$refreshInfo",
+                        "Detected ${severeFrames.size} severe janky frames (>${"%.1f".format(severeThreshold)}ms), slowest frame: ${"%.1f".format(maxMs)}ms$refreshInfo"
+                    ),
+                    suggestion = I18n.tr(
+                        "建议:\n1. 检查主线程是否有耗时操作 (IO/计算)\n2. 使用 Choreographer 回调验证帧率\n3. 检查是否有频繁 GC (对象分配过多)",
+                        "Suggestions:\n1. Check long-running work on main thread (IO/compute).\n2. Verify frame pacing via Choreographer callbacks.\n3. Check frequent GC caused by excessive allocations."
+                    )
                 )
             )
         } else if (slowFrames.isNotEmpty()) {
@@ -48,12 +51,14 @@ class SlowFrameRule(
                 DiagnosisReport.Issue(
                     severity = DiagnosisReport.Severity.MEDIUM,
                     rule = name,
-                    message = "检测到 ${slowFrames.size} 帧轻微掉帧 (>${"%.1f".format(effectiveThreshold)}ms)，" +
-                            "占比 ${"%.1f".format(ratio)}%",
-                    suggestion = "建议:\n" +
-                            "1. 减少布局层级，使用 ConstraintLayout\n" +
-                            "2. 避免 onDraw 中创建对象\n" +
-                            "3. 图片加载使用合适的分辨率"
+                    message = I18n.tr(
+                        "检测到 ${slowFrames.size} 帧轻微掉帧 (>${"%.1f".format(effectiveThreshold)}ms)，占比 ${"%.1f".format(ratio)}%",
+                        "Detected ${slowFrames.size} mildly janky frames (>${"%.1f".format(effectiveThreshold)}ms), ratio ${"%.1f".format(ratio)}%"
+                    ),
+                    suggestion = I18n.tr(
+                        "建议:\n1. 减少布局层级，使用 ConstraintLayout\n2. 避免 onDraw 中创建对象\n3. 图片加载使用合适的分辨率",
+                        "Suggestions:\n1. Reduce layout depth, prefer ConstraintLayout.\n2. Avoid object allocations in onDraw.\n3. Load images at proper resolution."
+                    )
                 )
             )
         }

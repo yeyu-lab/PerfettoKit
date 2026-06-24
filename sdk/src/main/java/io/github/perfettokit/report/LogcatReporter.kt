@@ -3,6 +3,7 @@ package io.github.perfettokit.report
 import android.util.Log
 import io.github.perfettokit.analyzer.RootCause
 import io.github.perfettokit.collector.FramePhase
+import io.github.perfettokit.i18n.I18n
 
 /**
  * Logcat 输出 Reporter — 总览优先 + 卡顿元凶前置 + 详细数据后置。
@@ -12,6 +13,11 @@ class LogcatReporter(
 ) : Reporter {
 
     override fun report(report: DiagnosisReport) {
+        if (!I18n.isChinese()) {
+            reportEn(report)
+            return
+        }
+
         Log.i(tag, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         Log.i(tag, "📊 ${report.summary}")
         Log.i(tag, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -322,6 +328,129 @@ class LogcatReporter(
                 Log.i(tag, "   Slow GPU completion: ${gfx.slowGpuCompletion}")
             }
             Log.i(tag, "   Score: ${gfx.smoothnessScore}/100 | Est.FPS: %.1f | Bottleneck: ${gfx.dominantBottleneck}".format(gfx.estimatedFps))
+        }
+
+        Log.i(tag, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    }
+
+    private fun reportEn(report: DiagnosisReport) {
+        Log.i(tag, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        Log.i(tag, "📊 ${report.summary}")
+        Log.i(tag, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+        val msgStats = report.slowMessageStats
+        val jankFrames = msgStats.jankAttribution.totalJankFrames
+        val jankRate = if (report.totalFrames > 0) jankFrames.toDouble() / report.totalFrames * 100 else 0.0
+        val fmStats = report.framePhaseStats
+        val fmJankRate = if (fmStats.totalFrames > 0) fmStats.jankFrames.toDouble() / fmStats.totalFrames * 100 else 0.0
+
+        Log.i(tag, "")
+        Log.i(tag, "[Overview]")
+        if (fmStats.totalFrames > 0) {
+            Log.i(tag, "   Render jank: %d/%d frames (%.1f%%) [FrameMetrics]".format(
+                fmStats.jankFrames, fmStats.totalFrames, fmJankRate
+            ))
+            Log.i(tag, "   Main-thread callback jank: %d/%d (%.1f%%) [Choreographer]".format(
+                jankFrames, report.totalFrames, jankRate
+            ))
+        } else {
+            Log.i(tag, "   Jank: %d/%d frames (%.1f%%)".format(jankFrames, report.totalFrames, jankRate))
+        }
+        Log.i(tag, "   Main thread CPU: %.1f%% | Duration: %dms".format(report.mainThreadStats.cpuPercent, report.durationMs))
+        Log.i(tag, "   Slow messages: %d/%d (%.1f%%) | Blocked: %dms | Max: %dms".format(
+            msgStats.totalSlowMessages,
+            msgStats.totalMessageCount,
+            msgStats.slowRatio * 100,
+            msgStats.totalSlowDurationMs,
+            msgStats.maxDurationMs
+        ))
+
+        if (report.unifiedMethodRanking.isNotEmpty()) {
+            Log.i(tag, "")
+            Log.i(tag, "[Main Thread Bottlenecks Top %d]".format(report.unifiedMethodRanking.size))
+            report.unifiedMethodRanking.forEach { entry ->
+                val slowTag = if (entry.slowHitCount > 0) "slow:${entry.slowHitCount}" else ""
+                val warmTag = if (entry.warmHitCount > 0) "warm:${entry.warmHitCount}" else ""
+                val countDesc = listOf(slowTag, warmTag).filter { it.isNotEmpty() }.joinToString(" | ").ifEmpty { "impact" }
+                Log.e(tag, "   🎯 ${entry.displayName}")
+                Log.e(tag, "      $countDesc | jank ${entry.jankFrameCount}/${entry.totalJankFrames} | ratio %.1fx | avg %.1fms, max ${entry.maxDurationMs}ms [${entry.category.name}]".format(
+                    entry.proportionRatio, entry.avgDurationMs
+                ))
+            }
+        }
+
+        Log.i(tag, "")
+        Log.i(tag, "[Metrics]")
+        val coreCount = report.cpuStats.coreCount
+        val trimmedAvg = report.cpuStats.trimmedAvgProcessCpuPercent
+        val maxCpu = report.cpuStats.maxProcessCpuPercent
+        val deviceCpuPercent = if (coreCount > 0) trimmedAvg / coreCount else 0.0
+        val cpuLine = if (report.cpuStats.systemCpuAvailable) {
+            "   CPU: avg %.0f%% peak %.0f%% | process/device %.1f%%/%d cores | system %.0f%%".format(
+                trimmedAvg, maxCpu, deviceCpuPercent, coreCount, report.cpuStats.avgSystemCpuPercent
+            )
+        } else {
+            "   CPU: avg %.0f%% peak %.0f%% | process/device %.1f%%/%d cores".format(
+                trimmedAvg, maxCpu, deviceCpuPercent, coreCount
+            )
+        }
+        Log.i(tag, cpuLine)
+        Log.i(tag, "   Memory: Heap %.0f%% (%dMB/%dMB) | GC %d times %dms | Growth %+dKB".format(
+            report.memoryStats.heapUsagePercent,
+            report.memoryStats.javaHeapMaxKb / 1024,
+            report.memoryStats.javaHeapMaxLimitKb / 1024,
+            report.memoryStats.gcCount,
+            report.memoryStats.gcTotalTimeMs,
+            report.memoryStats.memoryGrowthKb
+        ))
+        Log.i(tag, "   Threads: %d (running %d/%d cores) | Peak %d | Growth %+d".format(
+            report.threadStats.avgThreadCount,
+            report.threadStats.avgRunningThreadCount,
+            coreCount,
+            report.threadStats.maxThreadCount,
+            report.threadStats.threadCountGrowth
+        ))
+
+        if (report.issues.isNotEmpty()) {
+            Log.i(tag, "")
+            Log.i(tag, "[Detected Issues] (${report.issues.size})")
+            report.issues.forEach { issue ->
+                val icon = when (issue.severity) {
+                    DiagnosisReport.Severity.HIGH -> "🔴"
+                    DiagnosisReport.Severity.MEDIUM -> "🟡"
+                    DiagnosisReport.Severity.LOW -> "🟢"
+                }
+                val issueLabel = when (issue.rule) {
+                    "SlowFrame" -> "Slow frame detected"
+                    "ScrollJank" -> "Scroll jank detected"
+                    "CpuUsage" -> "High CPU usage"
+                    "Memory" -> "Memory/GC pressure"
+                    "Thread" -> "Thread scheduling issue"
+                    "GpuRendering" -> "GPU/render pipeline issue"
+                    "IODetector" -> "Main-thread IO detected"
+                    "AllocationTracker" -> "High allocation pressure"
+                    "BitmapDetector" -> "Oversized bitmap detected"
+                    "NetworkCollector" -> "High network traffic"
+                    "AnomalyDetector" -> "Anomaly vs baseline"
+                    else -> "Issue detected"
+                }
+                Log.w(tag, "$icon [${issue.rule}] $issueLabel")
+            }
+        }
+
+        val analysis = report.analysis
+        if (analysis != null && analysis.rootCauses.isNotEmpty()) {
+            Log.i(tag, "")
+            Log.i(tag, "[Root Cause Analysis]")
+            analysis.rootCauses.forEach { cause ->
+                val icon = when (cause.confidence) {
+                    RootCause.Confidence.HIGH -> "🎯"
+                    RootCause.Confidence.MEDIUM -> "🔍"
+                    RootCause.Confidence.LOW -> "❓"
+                }
+                Log.e(tag, "$icon [${cause.type}] ${cause.description}")
+                Log.d(tag, "   Evidence: ${cause.evidence}")
+            }
         }
 
         Log.i(tag, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

@@ -49,6 +49,7 @@ import io.github.perfettokit.collector.ThreadCollector
 import io.github.perfettokit.collector.ThreadSample
 import io.github.perfettokit.collector.ThreadStats
 import io.github.perfettokit.history.FrameStats
+import io.github.perfettokit.i18n.I18n
 import io.github.perfettokit.report.DiagnosisReport
 import io.github.perfettokit.report.JankFrameDetail
 import io.github.perfettokit.report.MainThreadMethod
@@ -243,7 +244,7 @@ class TraceSession internal constructor(
                 scene = scene,
                 durationMs = durationMs,
                 totalFrames = 0,
-                summary = "Skipped: no data",
+                summary = I18n.tr("已跳过：无有效数据", "Skipped: no data"),
                 issues = emptyList()
             )
         }
@@ -291,8 +292,14 @@ class TraceSession internal constructor(
             issues.add(DiagnosisReport.Issue(
                 severity = if (ioStats.totalViolations > 5) DiagnosisReport.Severity.HIGH else DiagnosisReport.Severity.MEDIUM,
                 rule = "IODetector",
-                message = "主线程 IO: ${ioStats.diskReadCount} 次磁盘读, ${ioStats.diskWriteCount} 次磁盘写, ${ioStats.networkOnMainCount} 次网络",
-                suggestion = "将 IO 操作移到子线程 (Dispatchers.IO / AsyncTask)"
+                message = I18n.tr(
+                    "主线程 IO: ${ioStats.diskReadCount} 次磁盘读, ${ioStats.diskWriteCount} 次磁盘写, ${ioStats.networkOnMainCount} 次网络",
+                    "Main-thread IO: ${ioStats.diskReadCount} disk reads, ${ioStats.diskWriteCount} disk writes, ${ioStats.networkOnMainCount} network calls"
+                ),
+                suggestion = I18n.tr(
+                    "将 IO 操作移到子线程 (Dispatchers.IO / AsyncTask)",
+                    "Move IO operations off the main thread (Dispatchers.IO / AsyncTask)."
+                )
             ))
         }
 
@@ -300,8 +307,14 @@ class TraceSession internal constructor(
             issues.add(DiagnosisReport.Issue(
                 severity = DiagnosisReport.Severity.MEDIUM,
                 rule = "AllocationTracker",
-                message = "高频对象分配: 峰值 ${allocStats.peakAllocPerSec} 次/秒, 共 ${allocStats.totalAllocKB}KB",
-                suggestion = "检查是否在 onDraw/onBindViewHolder 中创建对象，考虑对象池复用"
+                message = I18n.tr(
+                    "高频对象分配: 峰值 ${allocStats.peakAllocPerSec} 次/秒, 共 ${allocStats.totalAllocKB}KB",
+                    "High-frequency allocations: peak ${allocStats.peakAllocPerSec}/s, total ${allocStats.totalAllocKB}KB"
+                ),
+                suggestion = I18n.tr(
+                    "检查是否在 onDraw/onBindViewHolder 中创建对象，考虑对象池复用",
+                    "Check object creation in onDraw/onBindViewHolder and consider object pooling."
+                )
             ))
         }
 
@@ -309,8 +322,14 @@ class TraceSession internal constructor(
             issues.add(DiagnosisReport.Issue(
                 severity = DiagnosisReport.Severity.MEDIUM,
                 rule = "BitmapDetector",
-                message = "${bitmapStats.oversizeBitmapCount} 张大图, 浪费约 ${"%.1f".format(bitmapStats.totalWastedMB)}MB 内存",
-                suggestion = "使用 inSampleSize 缩放或 Glide/Coil 的 override(width, height)"
+                message = I18n.tr(
+                    "${bitmapStats.oversizeBitmapCount} 张大图, 浪费约 ${"%.1f".format(bitmapStats.totalWastedMB)}MB 内存",
+                    "${bitmapStats.oversizeBitmapCount} oversized bitmaps, ~${"%.1f".format(bitmapStats.totalWastedMB)}MB memory waste"
+                ),
+                suggestion = I18n.tr(
+                    "使用 inSampleSize 缩放或 Glide/Coil 的 override(width, height)",
+                    "Use inSampleSize downscaling or Glide/Coil override(width, height)."
+                )
             ))
         }
 
@@ -318,8 +337,14 @@ class TraceSession internal constructor(
             issues.add(DiagnosisReport.Issue(
                 severity = DiagnosisReport.Severity.LOW,
                 rule = "NetworkCollector",
-                message = "Session 期间网络流量: ${networkStats.totalKB}KB (↓${networkStats.totalRxBytes/1024}KB ↑${networkStats.totalTxBytes/1024}KB)",
-                suggestion = "检查是否有不必要的网络请求或未压缩的数据传输"
+                message = I18n.tr(
+                    "Session 期间网络流量: ${networkStats.totalKB}KB (↓${networkStats.totalRxBytes/1024}KB ↑${networkStats.totalTxBytes/1024}KB)",
+                    "Network traffic during session: ${networkStats.totalKB}KB (↓${networkStats.totalRxBytes/1024}KB ↑${networkStats.totalTxBytes/1024}KB)"
+                ),
+                suggestion = I18n.tr(
+                    "检查是否有不必要的网络请求或未压缩的数据传输",
+                    "Check for unnecessary requests or uncompressed payloads."
+                )
             ))
         }
 
@@ -395,7 +420,10 @@ class TraceSession internal constructor(
                     },
                     rule = "AnomalyDetector",
                     message = anomaly.message,
-                    suggestion = "与历史基线 (${anomaly.baselineSamples} 次) 对比发现异常偏离，建议检查近期代码变更"
+                    suggestion = I18n.tr(
+                        "与历史基线 (${anomaly.baselineSamples} 次) 对比发现异常偏离，建议检查近期代码变更",
+                        "Abnormal deviation detected vs historical baseline (${anomaly.baselineSamples} samples). Please review recent code changes."
+                    )
                 ))
                 Log.w("PerfettoKit", anomaly.message)
             }
@@ -427,20 +455,36 @@ class TraceSession internal constructor(
     }
 
     private fun buildSummary(frames: List<FrameData>, issues: List<DiagnosisReport.Issue>): String {
-        if (frames.isEmpty()) return "No frames captured in session '$scene'"
+        if (frames.isEmpty()) {
+            return I18n.tr(
+                "场景 '$scene' 未采集到帧数据",
+                "No frames captured in session '$scene'"
+            )
+        }
 
         val avgMs = frames.map { it.totalDurationMs }.average()
         val maxMs = frames.maxOf { it.totalDurationMs }
         val threshold = detectJankThreshold(frames)
         val jankCount = frames.count { it.totalDurationMs > threshold }
 
-        return buildString {
-            append("Scene: $scene | ")
-            append("Frames: ${frames.size} | ")
-            append("Avg: %.1fms | ".format(avgMs))
-            append("Max: %.1fms | ".format(maxMs))
-            append("Jank: $jankCount | ")
-            append("Issues: ${issues.size}")
+        return if (I18n.isChinese()) {
+            buildString {
+                append("场景: $scene | ")
+                append("帧数: ${frames.size} | ")
+                append("平均: %.1fms | ".format(avgMs))
+                append("最大: %.1fms | ".format(maxMs))
+                append("掉帧: $jankCount | ")
+                append("问题: ${issues.size}")
+            }
+        } else {
+            buildString {
+                append("Scene: $scene | ")
+                append("Frames: ${frames.size} | ")
+                append("Avg: %.1fms | ".format(avgMs))
+                append("Max: %.1fms | ".format(maxMs))
+                append("Jank: $jankCount | ")
+                append("Issues: ${issues.size}")
+            }
         }
     }
 
